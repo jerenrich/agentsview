@@ -12,8 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/config"
-	"go.kenn.io/agentsview/internal/db"
-	"go.kenn.io/agentsview/internal/dbtest"
 	"go.kenn.io/agentsview/internal/parser"
 	"go.kenn.io/agentsview/internal/server"
 	agentsync "go.kenn.io/agentsview/internal/sync"
@@ -87,66 +85,6 @@ func TestCollectLiveActivityTargetsDoesNotRequireExistingRoots(t *testing.T) {
 	_, statErr := os.Stat(missing)
 	assert.ErrorIs(t, statErr, os.ErrNotExist,
 		"target collection must not create or discover rollout roots")
-}
-
-func TestLiveActivityIndexedLookupReturnsExactStoredMetadata(t *testing.T) {
-	database := dbtest.OpenTestDB(t)
-	path := filepath.Join(t.TempDir(), "rollout.jsonl")
-	size := int64(123)
-	mtime := int64(456)
-	inode := int64(789)
-	device := int64(1011)
-	require.NoError(t, database.UpsertSession(t.Context(), db.Session{
-		ID:         "codex:exact-id",
-		Project:    "project",
-		Machine:    "local",
-		Agent:      string(parser.AgentCodex),
-		FilePath:   &path,
-		FileSize:   &size,
-		FileMtime:  &mtime,
-		FileInode:  &inode,
-		FileDevice: &device,
-	}))
-	lookup := newLiveActivityLookup(database)
-
-	got, found, err := lookup(t.Context(), "codex:exact-id")
-
-	require.NoError(t, err)
-	assert.True(t, found)
-	assert.Equal(t, agentsync.LiveActivitySource{
-		Path:              path,
-		StoredSize:        size,
-		StoredMTimeNS:     mtime,
-		StoredInode:       inode,
-		StoredDevice:      device,
-		HasStoredStat:     true,
-		HasStoredIdentity: true,
-	}, got)
-
-	_, found, err = lookup(t.Context(), "codex:missing-id")
-	require.NoError(t, err)
-	assert.False(t, found)
-}
-
-func TestLiveActivityIndexedLookupSchedulesRowsWithoutCompleteStat(t *testing.T) {
-	database := dbtest.OpenTestDB(t)
-	path := filepath.Join(t.TempDir(), "rollout.jsonl")
-	require.NoError(t, database.UpsertSession(t.Context(), db.Session{
-		ID:       "codex:no-stat",
-		Project:  "project",
-		Machine:  "local",
-		Agent:    string(parser.AgentCodex),
-		FilePath: &path,
-	}))
-
-	got, found, err := newLiveActivityLookup(database)(
-		t.Context(), "codex:no-stat",
-	)
-
-	require.NoError(t, err)
-	assert.True(t, found)
-	assert.Equal(t, path, got.Path)
-	assert.False(t, got.HasStoredStat)
 }
 
 func TestStartLiveActivityRunTracksSyncAndWaitsForStop(t *testing.T) {

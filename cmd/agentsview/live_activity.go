@@ -57,33 +57,6 @@ func collectLiveActivityTargets(
 	return targets, errors.Join(targetErrors...)
 }
 
-func newLiveActivityLookup(database *db.DB) agentsync.LiveActivityLookup {
-	return func(
-		ctx context.Context,
-		fullSessionID string,
-	) (agentsync.LiveActivitySource, bool, error) {
-		session, err := database.GetSessionFull(ctx, fullSessionID)
-		if err != nil {
-			return agentsync.LiveActivitySource{}, false, err
-		}
-		if session == nil || session.FilePath == nil || *session.FilePath == "" {
-			return agentsync.LiveActivitySource{}, false, nil
-		}
-		source := agentsync.LiveActivitySource{Path: *session.FilePath}
-		if session.FileSize != nil && session.FileMtime != nil {
-			source.StoredSize = *session.FileSize
-			source.StoredMTimeNS = *session.FileMtime
-			source.HasStoredStat = true
-		}
-		if session.FileInode != nil && session.FileDevice != nil {
-			source.StoredInode = *session.FileInode
-			source.StoredDevice = *session.FileDevice
-			source.HasStoredIdentity = true
-		}
-		return source, true, nil
-	}
-}
-
 func trackLiveActivitySync(
 	idleTracker *server.IdleTracker,
 	syncPaths agentsync.LiveActivitySync,
@@ -130,9 +103,14 @@ func startLiveActivityPoller(
 	}
 	poller := agentsync.NewLiveActivityPoller(
 		targets,
-		newLiveActivityLookup(database),
+		agentsync.DBLiveActivityLookup(database),
 		trackLiveActivitySync(idleTracker, engine.SyncPathsContext),
 		log.Printf,
+	)
+	poller.SetRecentLookup(
+		agentsync.DBRecentSessionLookup(
+			database, cfg.InstallationID, cfg.SourceMachines,
+		),
 	)
 	return startLiveActivityRun(runCtx, cancel, poller)
 }

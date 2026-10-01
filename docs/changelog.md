@@ -164,6 +164,13 @@ The latest published release is
   the markdown files inside it, and
   `brain/<id>/.system_generated/logs`, which holds the plaintext transcript.
   The other generated subfolders stay unwatched.
+- Active Codex Desktop sessions on macOS now update in AgentsView within about
+  30 seconds. Before, they could lag until Codex closed the session file,
+  AgentsView restarted, or you ran a Full Resync. macOS does not report
+  changes to a file that Codex keeps open, and Codex Desktop writes no
+  `history.jsonl` to say which sessions are active. AgentsView now also checks
+  the files of Codex sessions active in the last 24 hours. A session you resume
+  after more than 24 hours idle still waits until Codex closes its file.
 
 ## 0.44.0
 

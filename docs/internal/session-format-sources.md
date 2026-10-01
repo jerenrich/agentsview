@@ -654,19 +654,31 @@ fixtures retain this field; missing identities remain source-local.
   `session_index.jsonl` is verified as normal absence; read or scan failures
   remain unverified and cannot earn persisted freshness trust, so a transient
   failure cannot pin a stale stored title. Agentsview derives the hint path as
-  `<configured-sessions-root>/../history.jsonl`; a custom sessions root
-  without that sibling, or `HistoryPersistence::None`, degrades to ordinary
-  watcher behavior, degraded-coverage polling when applicable, and the daily
-  archive audit. Restart bootstrap reads at most the newest 4 MiB and accepts
-  records from the preceding 24 hours. If a daemon restarts during a longer
-  autonomous run whose last prompt falls outside those bounds, the rollout
-  relies on those fallbacks until its next prompt. Reverified 2026-08-16 with
-  Codex CLI 0.147.0: `codex exec --json` emitted a `thread.started` record
-  carrying one UUID, followed by turn and item records and a terminal usage
-  record, while its dated rollout began with a `session_meta.id` equal to that
-  UUID and ended with `task_complete`. One-shot capture therefore accepts only
-  this structured mode, tees its bytes without interpreting formatted stderr,
-  and validates the ID against filenames and `session_meta` inside the
+  `<configured-sessions-root>/../history.jsonl`. Restart bootstrap reads at
+  most the newest 4 MiB and accepts records from the preceding 24 hours.
+  Independently of hints, the poller also checks up to 256 Codex sessions
+  whose stored `ended_at` falls within the last 24 hours and whose machine is
+  this installation or the label of a configured Codex root. A custom sessions
+  root without the sibling hint file, `HistoryPersistence::None`, a producer
+  that writes no hints, or a daemon restart during a long autonomous run
+  therefore still gets 30-second freshness while the stored session is recent.
+  A session whose stored `ended_at` is older than 24 hours and that gets no
+  hint falls back to ordinary watcher behavior, degraded-coverage polling when
+  applicable, and the daily archive audit. So does a session stored under a
+  machine label that is no longer configured, such as one admitted before its
+  root was relabeled or an unadopted pre-installation hostname, because a row
+  keeps the label it was admitted under. Reported 2026-09-26, observational
+  and not reverified against pinned sources: Codex Desktop on macOS writes no
+  `history.jsonl` and keeps the active rollout open, and FSEvents reports that
+  rollout when it is created and closed, not as it grows. On macOS, such a
+  session that resumes after more than 24 hours idle stays stale until Codex
+  closes the rollout. Reverified 2026-08-16 with Codex CLI 0.147.0:
+  `codex exec --json` emitted a `thread.started` record carrying one UUID,
+  followed by turn and item records and a terminal usage record, while its
+  dated rollout began with a `session_meta.id` equal to that UUID and ended
+  with `task_complete`. One-shot capture therefore accepts only this
+  structured mode, tees its bytes without interpreting formatted stderr, and
+  validates the ID against filenames and `session_meta` inside the
   wrapper-start local and UTC days, each plus or minus one day. It copies and
   ingests that exact rollout first, then uses parsed `spawn_agent` links and
   their message timestamps to repeat the same bounded day-shard lookup around
@@ -3487,8 +3499,8 @@ schemas keep their existing ordering behavior.
   (`cli/src/utils/sdk-event-handlers.ts`). Nested blocks carry no timestamps.
 - **Evidence:** `source`.
 - **Upstream:** Clone `https://github.com/CodebuffAI/freebuff.git` at
-  `ab18ec9d88d449e8766f9c25db52cf5c5ae3c869`, checked 2026-09-26. The
-  snapshot SHA is rewritten over time, so re-verify before quoting. See
+  `ab18ec9d88d449e8766f9c25db52cf5c5ae3c869`, checked 2026-09-26. The snapshot
+  SHA is rewritten over time, so re-verify before quoting. See
   [chat.ts](https://github.com/CodebuffAI/freebuff/blob/ab18ec9d88d449e8766f9c25db52cf5c5ae3c869/cli/src/types/chat.ts)
   for `ChatMessage` and `ContentBlock`,
   [session-state.ts](https://github.com/CodebuffAI/freebuff/blob/ab18ec9d88d449e8766f9c25db52cf5c5ae3c869/common/src/types/session-state.ts)
@@ -3501,14 +3513,13 @@ schemas keep their existing ordering behavior.
   for `FREEBUFF_CONFIG_DIR`.
 - **Usage and cost:** `creditsUsed` resets at each user prompt, so
   `run-state.json` holds only the last prompt's spend. Each completed AI
-  message carries its prompt's `credits` and a `metadata.runState` snapshot.
-  1 credit = $0.01. BYOK runs record the model in
+  message carries its prompt's `credits` and a `metadata.runState` snapshot. 1
+  credit = $0.01. BYOK runs record the model in
   `metadata.runState.inference.model`; hosted runs record no model, and the
   agent template (`agentType`, e.g. `base2-deepseek`) names only a model
-  family. `contextTokenBaseline.model` is a context anchor, not a billing
-  model. `contextTokenCount` is context occupancy, not billed tokens. No
-  per-message input/output/cache tokens are persisted. Freebuff has no
-  credits.
+  family. `contextTokenBaseline.model` is a context anchor, not a billing model.
+  `contextTokenCount` is context occupancy, not billed tokens. No per-message
+  input/output/cache tokens are persisted. Freebuff has no credits.
 - **Agentsview:** `internal/parser/codebuff.go` and
   `internal/parser/codebuff_provider.go`. Each positive per-message `credits`
   becomes a reported-cost event; transcripts without them fall back to
@@ -3516,9 +3527,9 @@ schemas keep their existing ordering behavior.
   that shares the transcript's source identity. Attachments are stored as
   marker lines, never their paths or full pasted content; sponsored-proposal
   payloads are not stored. The sidecar supplies a missing first prompt and,
-  for an empty transcript, the message count. Termination status is `tool_call_pending` or `clean`.
-  Watch events on `log.jsonl`, `trace.jsonl`, and `.tmp` siblings are
-  ignored.
+  for an empty transcript, the message count. Termination status is
+  `tool_call_pending` or `clean`. Watch events on `log.jsonl`, `trace.jsonl`,
+  and `.tmp` siblings are ignored.
 
 ## Evener (`evener`)
 

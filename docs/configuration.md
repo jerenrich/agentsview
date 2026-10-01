@@ -1513,17 +1513,42 @@ full rewrite.
 AgentsView keeps the database in sync with session files through three
 mechanisms:
 
-1. **File watcher** — uses fsnotify to detect file changes. An isolated edit is
-    batched for 500ms; watcher-driven sync start times remain at least five
-    seconds apart. Common dependency and build folders (`node_modules`,
-    `__pycache__`, `.git`, `vendor`, `dist`, etc.) are automatically skipped to
-    reduce noise and overhead.
-1. **Periodic sync** — full directory scan every 15 minutes as a safety net
-1. **Codex live-activity hints** — every 30 seconds, the daemon checks the
-    provider-declared `history.jsonl` append stream and file metadata for a
-    bounded set of recently active rollouts. This is a freshness backstop for
+1. **File watcher** — uses FSEvents on macOS and fsnotify elsewhere to detect
+    file changes. An isolated edit is batched for 500ms; watcher-driven sync
+    start times remain at least five seconds apart. Common dependency and build
+    folders (`node_modules`, `__pycache__`, `.git`, `vendor`, `dist`, etc.) are
+    automatically skipped to reduce noise and overhead. On macOS, FSEvents
+    reports a file that its producer keeps open only when the file is created
+    and closed, not as it grows.
+1. **Scheduled reconciliation** — every 15 minutes, a scoped scan of the
+    agents whose watch coverage is known to be partial, such as shallow
+    directory watches or database change cursors. Other agents rely on the
+    watcher, the fallback polling described under
+    [Large Watch Trees](#large-watch-trees), and the daily archive audit.
+1. **Codex live-activity polling** — every 30 seconds, the daemon checks file
+    metadata for a bounded set of recently active rollouts and syncs the ones
+    that changed. A rollout is recently active when `history.jsonl` names it or
+    when its stored session ended within the last 24 hours. The second source
+    covers producers such as Codex Desktop that write no `history.jsonl` and
+    keep the active rollout open. The daemon checks at most 256 of these stored
+    sessions per poll, newest first. They can come from any configured Codex
+    root, including a `[[session_sources]]` root labeled with another
+    machine's key, such as a shared mount. This is a freshness backstop for
     already indexed sessions, not a session source: normal discovery and sync
     still own ingestion, deletion, and canonical-path selection.
+
+Recent-session polling has two known gaps on macOS. In both, Codex Desktop
+writes no `history.jsonl` hint, macOS does not report appends to the open file,
+and AgentsView picks up the new activity only when Codex closes the session
+file:
+
+- You resume a Codex Desktop session that has been idle for more than 24 hours.
+  Its stored end time is outside the 24-hour window.
+- The session is stored under a machine label that is no longer in your
+  configuration. A session keeps the label it was first stored under, so this
+  happens after you change a `[[session_sources]]` root's `machine` value, or
+  for an old hostname label you have not adopted with
+  [`db adopt-machine`](/docs/commands/#agentsview-db-adopt-machine).
 
 Change detection uses file size, mtime, inode, and device tracking to validate
 incremental parses more reliably. A pool of 8 workers processes files in
@@ -1531,8 +1556,8 @@ parallel during sync.
 
 Codex history hints are available when the producing frontend writes
 `history.jsonl`. In Codex configuration, `[history] persistence = "none"`
-disables those writes; frontends that do not produce history entries retain the
-native watcher and periodic-sync freshness behavior. AgentsView reads only
+disables those writes; sessions whose stored activity is recent still get
+live-activity polling. AgentsView reads only
 session identity and timestamp metadata from accepted hint records and neither
 stores nor logs submitted prompt text.
 
@@ -1544,7 +1569,7 @@ archive for another history file. Missing hint files remain cheap probes.
 The initial daemon poll bootstraps at most the newest 4 MiB of each history file
 and accepts records at most 24 hours old. If AgentsView restarts during a long
 autonomous run whose last persisted prompt is outside either bound, that rollout
-uses native-watcher freshness until another persisted prompt makes it hot again.
+stays hot while its stored session ended within the last 24 hours.
 
 For `s3://` Claude, Codex, and Cursor roots, change detection uses object size,
 `LastModified`, and available object fingerprints such as ETag, version ID, and

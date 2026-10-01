@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/activity"
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/dbtest"
 	"go.kenn.io/agentsview/internal/parser"
 	agentsync "go.kenn.io/agentsview/internal/sync"
 	"go.kenn.io/agentsview/internal/testjsonl"
@@ -115,27 +116,7 @@ func TestLiveActivityPollerRefreshesOpenCodexActivityAndUsage(t *testing.T) {
 			Hints:    hints,
 			Sources:  hintSources,
 		}},
-		func(
-			ctx context.Context,
-			id string,
-		) (agentsync.LiveActivitySource, bool, error) {
-			session, lookupErr := env.db.GetSessionFull(ctx, id)
-			if lookupErr != nil || session == nil || session.FilePath == nil {
-				return agentsync.LiveActivitySource{}, false, lookupErr
-			}
-			source := agentsync.LiveActivitySource{Path: *session.FilePath}
-			if session.FileSize != nil && session.FileMtime != nil {
-				source.StoredSize = *session.FileSize
-				source.StoredMTimeNS = *session.FileMtime
-				source.HasStoredStat = true
-			}
-			if session.FileInode != nil && session.FileDevice != nil {
-				source.StoredInode = *session.FileInode
-				source.StoredDevice = *session.FileDevice
-				source.HasStoredIdentity = true
-			}
-			return source, true, nil
-		},
+		agentsync.DBLiveActivityLookup(env.db),
 		env.engine.SyncPathsContext,
 		nil,
 	)
@@ -194,6 +175,233 @@ func TestLiveActivityPollerRefreshesOpenCodexActivityAndUsage(t *testing.T) {
 		thirdUser.Truncate(5*time.Minute),
 		thirdUser.Truncate(5*time.Minute).Add(5*time.Minute),
 	)
+}
+
+// Codex Desktop writes no history.jsonl and keeps its rollout open, and macOS
+// FSEvents does not report those appends. Stored recent activity must still
+// make the live-activity poller pick them up.
+func TestLiveActivityPollerRefreshesOpenCodexRolloutWithoutHistoryHints(t *testing.T) {
+	const (
+		uuid      = "019f0000-0000-7000-8000-000000000004"
+		sessionID = "codex:" + uuid
+	)
+	now := time.Date(2026, 7, 29, 15, 30, 0, 0, time.UTC)
+	firstUser := now.Add(-35 * time.Minute)
+	secondUser := now.Add(-4 * time.Minute)
+
+	base := t.TempDir()
+	sessions := filepath.Join(base, "sessions")
+	require.NoError(t, os.MkdirAll(sessions, 0o755))
+	env := setupSingleAgentTestEnvWithDirs(
+		t, parser.AgentCodex, []string{sessions},
+	)
+	rollout := env.writeCodexSession(
+		t,
+		filepath.Join("2026", "07", "29"),
+		"rollout-2026-07-29T14-55-00-"+uuid+".jsonl",
+		testjsonl.JoinJSONL(
+			testjsonl.CodexSessionMetaJSON(
+				uuid, "/workspace/project", "user", firstUser.Format(time.RFC3339),
+			),
+			testjsonl.CodexMsgJSON("user", "first", firstUser.Format(time.RFC3339)),
+			testjsonl.CodexMsgJSON(
+				"assistant", "answer", firstUser.Add(time.Minute).Format(time.RFC3339),
+			),
+		),
+	)
+	initialMTime := firstUser.Add(-time.Hour)
+	require.NoError(t, os.Chtimes(rollout, initialMTime, initialMTime))
+	require.NoError(t, env.engine.SyncPathsContext(t.Context(), []string{rollout}))
+
+	appendDescriptor, err := os.OpenFile(rollout, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, appendDescriptor.Close())
+	})
+	_, err = appendDescriptor.WriteString(testjsonl.JoinJSONL(
+		testjsonl.CodexMsgJSON("user", "second", secondUser.Format(time.RFC3339)),
+		testjsonl.CodexMsgJSON(
+			"assistant", "second answer",
+			secondUser.Add(time.Minute).Format(time.RFC3339),
+		),
+	))
+	require.NoError(t, err)
+	require.NoFileExists(t, filepath.Join(base, "history.jsonl"))
+
+	provider, ok := parser.NewProvider(parser.AgentCodex, parser.ProviderConfig{
+		Roots:   []string{sessions},
+		Machine: "local",
+	})
+	require.True(t, ok)
+	hints, supported, err := parser.ResolveActivityHintProvider(provider)
+	require.NoError(t, err)
+	require.True(t, supported)
+	hintSources, err := hints.ActivityHintSources(t.Context())
+	require.NoError(t, err)
+	newPoller := func() *agentsync.LiveActivityPoller {
+		return agentsync.NewLiveActivityPoller(
+			[]agentsync.LiveActivityTarget{{
+				Provider: provider, Hints: hints, Sources: hintSources,
+			}},
+			func(context.Context, string) (agentsync.LiveActivitySource, bool, error) {
+				require.FailNow(t, "no history hint exists, so no hinted lookup is expected")
+				return agentsync.LiveActivitySource{}, false, nil
+			},
+			env.engine.SyncPathsContext,
+			nil,
+		)
+	}
+
+	hintOnly, err := newPoller().PollOnce(t.Context(), now)
+	require.NoError(t, err)
+	assert.Equal(t, 0, hintOnly.SyncPaths,
+		"without stored recent activity the open rollout stays invisible")
+	assertSessionMessageCount(t, env.db, sessionID, 2)
+
+	poller := newPoller()
+	poller.SetRecentLookup(agentsync.DBRecentSessionLookup(env.db, "local", nil))
+	stats, err := poller.PollOnce(t.Context(), now)
+	require.NoError(t, err)
+	assert.Equal(t, 1, stats.RecentSessions)
+	assert.Equal(t, 1, stats.SourceStats)
+	assert.Equal(t, 1, stats.SyncPaths)
+	assertSessionMessageCount(t, env.db, sessionID, 4)
+
+	stats, err = poller.PollOnce(t.Context(), now.Add(30*time.Second))
+	require.NoError(t, err)
+	assert.Equal(t, 0, stats.SyncPaths, "an unchanged rollout is not re-synced")
+
+	_, err = appendDescriptor.WriteString(testjsonl.CodexMsgJSON(
+		"user", "third", now.Add(-time.Minute).Format(time.RFC3339),
+	))
+	require.NoError(t, err)
+	stats, err = poller.PollOnce(t.Context(), now.Add(time.Minute))
+	require.NoError(t, err)
+	assert.Equal(t, 1, stats.SyncPaths)
+	assertSessionMessageCount(t, env.db, sessionID, 5)
+}
+
+// A configured source can label its sessions with a peer machine, such as a
+// shared mount of another machine's Codex sessions. Recent-activity polling
+// must still cover it.
+func TestLiveActivityPollerRefreshesRecentSessionsFromPeerLabeledSource(t *testing.T) {
+	const (
+		uuid      = "019f0000-0000-7000-8000-000000000005"
+		sessionID = "codex:" + uuid
+	)
+	now := time.Date(2026, 7, 29, 15, 30, 0, 0, time.UTC)
+	userAt := now.Add(-10 * time.Minute)
+	sessions := filepath.Join(t.TempDir(), "sessions")
+	rollout := filepath.Join(sessions, "2026", "07", "29",
+		"rollout-2026-07-29T15-20-00-"+uuid+".jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(rollout), 0o755))
+	require.NoError(t, os.WriteFile(rollout, []byte(testjsonl.JoinJSONL(
+		testjsonl.CodexSessionMetaJSON(
+			uuid, "/workspace/project", "user", userAt.Format(time.RFC3339),
+		),
+		testjsonl.CodexMsgJSON("user", "first", userAt.Format(time.RFC3339)),
+	)), 0o644))
+	sourceMachines := map[parser.AgentType]map[string]string{
+		parser.AgentCodex: {sessions: "peer-machine"},
+	}
+	database := dbtest.OpenTestDB(t)
+	engine := agentsync.NewEngine(t.Context(), database, agentsync.EngineConfig{
+		AgentDirs:      map[parser.AgentType][]string{parser.AgentCodex: {sessions}},
+		SourceMachines: sourceMachines,
+		Machine:        "local",
+	})
+	require.NoError(t, engine.SyncPathsContext(t.Context(), []string{rollout}))
+	stored, err := database.GetSessionFull(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, "peer-machine", stored.Machine)
+	appendDescriptor, err := os.OpenFile(rollout, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = appendDescriptor.WriteString(testjsonl.CodexMsgJSON(
+		"assistant", "answer", now.Add(-time.Minute).Format(time.RFC3339),
+	))
+	require.NoError(t, err)
+	require.NoError(t, appendDescriptor.Close())
+
+	provider, ok := parser.NewProvider(parser.AgentCodex, parser.ProviderConfig{
+		Roots: []string{sessions}, Machine: "local",
+		SourceMachines: sourceMachines[parser.AgentCodex],
+	})
+	require.True(t, ok)
+	poller := agentsync.NewLiveActivityPoller(
+		[]agentsync.LiveActivityTarget{{Provider: provider}},
+		agentsync.DBLiveActivityLookup(database),
+		engine.SyncPathsContext,
+		nil,
+	)
+	poller.SetRecentLookup(
+		agentsync.DBRecentSessionLookup(database, "local", sourceMachines),
+	)
+	stats, err := poller.PollOnce(t.Context(), now)
+	require.NoError(t, err)
+	assert.Equal(t, 1, stats.RecentSessions)
+	assert.Equal(t, 1, stats.SyncPaths)
+	assertSessionMessageCount(t, database, sessionID, 2)
+}
+
+func TestLiveActivityIndexedLookupReturnsExactStoredMetadata(t *testing.T) {
+	database := dbtest.OpenTestDB(t)
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	size := int64(123)
+	mtime := int64(456)
+	inode := int64(789)
+	device := int64(1011)
+	require.NoError(t, database.UpsertSession(t.Context(), db.Session{
+		ID:         "codex:exact-id",
+		Project:    "project",
+		Machine:    "local",
+		Agent:      string(parser.AgentCodex),
+		FilePath:   &path,
+		FileSize:   &size,
+		FileMtime:  &mtime,
+		FileInode:  &inode,
+		FileDevice: &device,
+	}))
+	lookup := agentsync.DBLiveActivityLookup(database)
+
+	got, found, err := lookup(t.Context(), "codex:exact-id")
+
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, agentsync.LiveActivitySource{
+		Path:              path,
+		StoredSize:        size,
+		StoredMTimeNS:     mtime,
+		StoredInode:       inode,
+		StoredDevice:      device,
+		HasStoredStat:     true,
+		HasStoredIdentity: true,
+	}, got)
+
+	_, found, err = lookup(t.Context(), "codex:missing-id")
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+func TestLiveActivityIndexedLookupSchedulesRowsWithoutCompleteStat(t *testing.T) {
+	database := dbtest.OpenTestDB(t)
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	require.NoError(t, database.UpsertSession(t.Context(), db.Session{
+		ID:       "codex:no-stat",
+		Project:  "project",
+		Machine:  "local",
+		Agent:    string(parser.AgentCodex),
+		FilePath: &path,
+	}))
+
+	got, found, err := agentsync.DBLiveActivityLookup(database)(
+		t.Context(), "codex:no-stat",
+	)
+
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, path, got.Path)
+	assert.False(t, got.HasStoredStat)
 }
 
 func requireDailyOutputTokens(
