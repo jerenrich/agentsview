@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +46,7 @@ func TestGetSessionTimingSourceEvidenceExcludesIdle(t *testing.T) {
 		`{"timestamp":"2026-04-26T11:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"second"}}`,
 	}, "\n") + "\n"
 	path := filepath.Join(t.TempDir(), "timing.jsonl")
-	require.NoError(t, os.WriteFile(path, []byte(source), 0600))
+	require.NoError(t, os.WriteFile(path, []byte(source), 0o600))
 	_, err := d.getWriter().Exec(ctx, "UPDATE sessions SET agent='codex', file_path=?, file_size=? WHERE id=?", path, len(source), sid)
 	require.NoError(t, err)
 	got, err := d.GetSessionTiming(ctx, sid)
@@ -72,7 +73,7 @@ func TestGetSessionTimingSourceEvidenceExcludesIdle(t *testing.T) {
 func TestTimingSourceCacheIdentityAndImportedPrefix(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "timing.jsonl")
 	first := `{"timestamp":"2026-04-26T10:00:00Z","type":"session_meta","payload":{"id":"first"}}` + "\n"
-	require.NoError(t, os.WriteFile(path, []byte(first), 0600))
+	require.NoError(t, os.WriteFile(path, []byte(first), 0o600))
 	sess := &Session{ID: "codex:first", Agent: "codex", FilePath: &path, FileSize: new(int64(len(first)))}
 	require.NotNil(t, readTimingSource(t.Context(), sess))
 	wrong := *sess
@@ -80,13 +81,13 @@ func TestTimingSourceCacheIdentityAndImportedPrefix(t *testing.T) {
 	assert.Nil(t, readTimingSource(t.Context(), &wrong))
 	replacement := strings.ReplaceAll(first, "first", "other")
 	temporary := path + ".replacement"
-	require.NoError(t, os.WriteFile(temporary, []byte(replacement), 0600))
+	require.NoError(t, os.WriteFile(temporary, []byte(replacement), 0o600))
 	require.NoError(t, os.Rename(temporary, path))
 	assert.Nil(t, readTimingSource(t.Context(), sess))
 	require.NotNil(t, readTimingSource(t.Context(), &wrong))
 	// An append outside the archived byte count does not enter timing data.
 	appended := replacement + `{"timestamp":"2026-04-26T10:00:01Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning"},"started_at_ms":1777197600000,"completed_at_ms":1777197601000}}` + "\n"
-	require.NoError(t, os.WriteFile(path, []byte(appended), 0600))
+	require.NoError(t, os.WriteFile(path, []byte(appended), 0o600))
 	evidence := readTimingSource(t.Context(), &wrong)
 	require.NotNil(t, evidence)
 	assert.Empty(t, evidence.Model)
@@ -100,8 +101,8 @@ func TestTimingActivityParallelModelAndToolsReconcile(t *testing.T) {
 		Turns: []parser.TimingInterval{{Start: epoch, End: epoch + 10000}},
 		Model: []parser.TimingInterval{{Start: epoch, End: epoch + 4000}, {Start: epoch + 2000, End: epoch + 6000}},
 		Calls: []parser.TimingCall{
-			{ID: "a", TimingInterval: parser.TimingInterval{Start: epoch + 3000, End: epoch + 7000}},
-			{ID: "b", TimingInterval: parser.TimingInterval{Start: epoch + 5000, End: epoch + 8000}},
+			{ID: "a", Start: epoch + 3000, End: epoch + 7000},
+			{ID: "b", Start: epoch + 5000, End: epoch + 8000},
 		},
 	}
 	got := AssembleTiming(&Session{ID: "parallel", StartedAt: new(stamp(0)), EndedAt: new(stamp(10000))},
@@ -136,7 +137,7 @@ func TestTimingActivityLifecycleWithoutVisiblePrompt(t *testing.T) {
 			source := &parser.SessionTimingEvidence{
 				Turns: []parser.TimingInterval{{Start: epoch, End: epoch + 6000}, {Start: epoch + 10000, End: epoch + 12000}},
 				Model: []parser.TimingInterval{{Start: epoch, End: epoch + 2000}},
-				Calls: []parser.TimingCall{{ID: "a", TimingInterval: parser.TimingInterval{Start: epoch + 3000, End: epoch + 6000}}},
+				Calls: []parser.TimingCall{{ID: "a", Start: epoch + 3000, End: epoch + 6000}},
 			}
 			got := AssembleTiming(&Session{StartedAt: new(stamp(5000)), EndedAt: new(stamp(12000))}, turns,
 				[]CallRow{{MessageID: 1, ToolUseID: "a", ExecutionStart: stamp(4000), ExecutionEnd: stamp(5000)}}, time.Time{}, source)
@@ -161,15 +162,15 @@ func TestTimingSourceCompressedImportedPrefix(t *testing.T) {
 	defer encoder.Close()
 	compressed := encoder.EncodeAll([]byte(source), nil)
 	path := filepath.Join(t.TempDir(), "timing.jsonl.zst")
-	require.NoError(t, os.WriteFile(path, compressed, 0600))
+	require.NoError(t, os.WriteFile(path, compressed, 0o600))
 	sess := &Session{ID: "codex:compressed", Agent: "codex", FilePath: &path, FileSize: new(int64(len(compressed)))}
 	got := readTimingSource(t.Context(), sess)
 	require.NotNil(t, got)
 	require.Len(t, got.Turns, 1)
 	assert.Equal(t, int64(10000), got.Turns[0].End-got.Turns[0].Start)
 	// Later complete frames must not leak past the compressed imported byte size.
-	appended := append(compressed, encoder.EncodeAll([]byte(source), nil)...)
-	require.NoError(t, os.WriteFile(path, appended, 0600))
+	appended := slices.Concat(compressed, encoder.EncodeAll([]byte(source), nil))
+	require.NoError(t, os.WriteFile(path, appended, 0o600))
 	got = readTimingSource(t.Context(), sess)
 	require.NotNil(t, got)
 	assert.Len(t, got.Turns, 1)
@@ -215,7 +216,7 @@ func TestSourceTimingRejectsAmbiguousRepeatedCallMatches(t *testing.T) {
 				calls = append(calls, CallRow{MessageID: int64(i + 1), ToolUseID: "same"})
 			}
 			for _, start := range tc.requests {
-				source.Calls = append(source.Calls, parser.TimingCall{ID: "same", TimingInterval: parser.TimingInterval{Start: epoch + start, End: epoch + start + 500}})
+				source.Calls = append(source.Calls, parser.TimingCall{ID: "same", Start: epoch + start, End: epoch + start + 500})
 			}
 			got := sourceTimedCalls(rows, calls, source)
 			for i, want := range tc.want {
@@ -236,7 +237,7 @@ func TestTimingFallbackTotalsExcludeTimeBeforeFirstPrompt(t *testing.T) {
 func TestTimingSourceRequiresKnownImportedSize(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "timing.jsonl")
 	source := `{"timestamp":"2026-04-26T10:00:00Z","type":"session_meta","payload":{"id":"timing"}}` + "\n"
-	require.NoError(t, os.WriteFile(path, []byte(source), 0600))
+	require.NoError(t, os.WriteFile(path, []byte(source), 0o600))
 	for _, size := range []*int64{nil, new(int64(0)), new(int64(-1))} {
 		assert.Nil(t, readTimingSource(t.Context(), &Session{ID: "codex:timing", Agent: "codex", FilePath: &path, FileSize: size}), "an unknown import boundary must not read unimported data")
 	}
@@ -244,7 +245,7 @@ func TestTimingSourceRequiresKnownImportedSize(t *testing.T) {
 
 func TestTimingSourceNegativeCacheAndSnapshotReplacement(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "timing.jsonl")
-	require.NoError(t, os.WriteFile(path, []byte("not json\n"), 0600))
+	require.NoError(t, os.WriteFile(path, []byte("not json\n"), 0o600))
 	sess := &Session{ID: "codex:timing", Agent: "codex", FilePath: &path, FileSize: new(int64(9))}
 	assert.Nil(t, readTimingSource(t.Context(), sess))
 	info, err := os.Stat(path)
@@ -253,7 +254,7 @@ func TestTimingSourceNegativeCacheAndSnapshotReplacement(t *testing.T) {
 	assert.True(t, found, "a malformed snapshot must not be rescanned on every request")
 	assert.Nil(t, evidence)
 	valid := `{"timestamp":"2026-04-26T10:00:00Z","type":"session_meta","payload":{"id":"timing"}}` + "\n"
-	require.NoError(t, os.WriteFile(path, []byte(valid), 0600))
+	require.NoError(t, os.WriteFile(path, []byte(valid), 0o600))
 	sess.FileSize = new(int64(len(valid)))
 	require.NotNil(t, readTimingSource(t.Context(), sess))
 	timingSources.Lock()
@@ -318,16 +319,16 @@ func TestTimingSourceCacheRejectsOversizeEntry(t *testing.T) {
 }
 
 func TestTimingSourceCancellationWhileReadersBusy(t *testing.T) {
-	for i := 0; i < cap(timingSourceReads); i++ {
+	for range cap(timingSourceReads) {
 		timingSourceReads <- struct{}{}
 	}
 	defer func() {
-		for i := 0; i < cap(timingSourceReads); i++ {
+		for range cap(timingSourceReads) {
 			<-timingSourceReads
 		}
 	}()
 	path := filepath.Join(t.TempDir(), "timing.jsonl")
-	require.NoError(t, os.WriteFile(path, []byte("{}\n"), 0600))
+	require.NoError(t, os.WriteFile(path, []byte("{}\n"), 0o600))
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan *parser.SessionTimingEvidence, 1)
 	go func() {
@@ -338,7 +339,7 @@ func TestTimingSourceCancellationWhileReadersBusy(t *testing.T) {
 	case got := <-done:
 		assert.Nil(t, got)
 	case <-time.After(time.Second):
-		t.Fatal("reader did not honor cancellation")
+		require.Fail(t, "reader did not honor cancellation")
 	}
 }
 
@@ -381,19 +382,19 @@ func TestTimingAccountingWithMissingOrReversedSessionBounds(t *testing.T) {
 func TestTimingSourceConcurrentReads(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "timing.jsonl")
 	source := `{"timestamp":"2026-04-26T10:00:00Z","type":"session_meta","payload":{"id":"timing"}}` + "\n"
-	require.NoError(t, os.WriteFile(path, []byte(source), 0600))
+	require.NoError(t, os.WriteFile(path, []byte(source), 0o600))
 	sess := &Session{ID: "codex:timing", Agent: "codex", FilePath: &path, FileSize: new(int64(len(source)))}
 	results := make(chan *parser.SessionTimingEvidence, 16)
-	for i := 0; i < cap(results); i++ {
+	for range cap(results) {
 		go func() { results <- readTimingSource(t.Context(), sess) }()
 	}
-	for i := 0; i < cap(results); i++ {
+	for range cap(results) {
 		select {
 		case result := <-results:
 			require.NotNil(t, result)
 			assert.Equal(t, "timing", result.SourceID)
 		case <-time.After(5 * time.Second):
-			t.Fatal("concurrent source reads did not complete")
+			require.Fail(t, "concurrent source reads did not complete")
 		}
 	}
 	timingSources.Lock()

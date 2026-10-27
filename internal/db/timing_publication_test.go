@@ -52,7 +52,7 @@ func TestPendingSessionContentFailureRetainsPreviousTiming(t *testing.T) {
 	bytes, err := os.ReadFile(*original.FilePath)
 	require.NoError(t, err)
 	bytes = append(bytes, []byte(`{"timestamp":"2026-04-26T11:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"second"}}`+"\n"+`{"timestamp":"2026-04-26T11:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"second"}}`+"\n")...)
-	require.NoError(t, os.WriteFile(*original.FilePath, bytes, 0600))
+	require.NoError(t, os.WriteFile(*original.FilePath, bytes, 0o600))
 	info, err := os.Stat(*original.FilePath)
 	require.NoError(t, err)
 	digest := sha256.Sum256(bytes)

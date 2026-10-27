@@ -242,7 +242,7 @@ func TestRawContentAndPayloadIgnoreTransientTimingCapture(t *testing.T) {
 		`{"timestamp":"2026-04-26T10:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"private-capture-call-id"}}` + "\n" +
 		`{"timestamp":"2026-04-26T10:00:05Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}` + "\n"
 	path := filepath.Join(t.TempDir(), "timing.jsonl")
-	require.NoError(t, os.WriteFile(path, []byte(source), 0600))
+	require.NoError(t, os.WriteFile(path, []byte(source), 0o600))
 	p := ingest.PreparedSession{Session: db.Session{ID: "codex:timing-source", Agent: "codex", FilePath: &path, FileSize: new(int64(len(source)))}, Messages: []db.Message{{Ordinal: 0, Role: "assistant", Content: "normalized answer"}}}
 	revision, err := rawContentRevision(p)
 	require.NoError(t, err)

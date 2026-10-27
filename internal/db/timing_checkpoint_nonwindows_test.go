@@ -15,7 +15,7 @@ import (
 
 func TestTimingCaptureRejectsNamedPipeWithoutBlocking(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
-	require.NoError(t, syscall.Mkfifo(path, 0600))
+	require.NoError(t, syscall.Mkfifo(path, 0o600))
 	s := Session{ID: "codex:timing", Agent: "codex", FilePath: &path, FileSize: new(int64(1))}
 	done := make(chan *timingEvidenceRecord, 1)
 	go func() {
@@ -39,7 +39,7 @@ func TestTimingSourceOpenDoesNotBlockOnNamedPipeReplacement(t *testing.T) {
 	// Exercise the open itself: an earlier stat may have observed a regular
 	// file that was replaced with this FIFO before the descriptor was opened.
 	path := filepath.Join(t.TempDir(), "replaced.jsonl")
-	require.NoError(t, syscall.Mkfifo(path, 0600))
+	require.NoError(t, syscall.Mkfifo(path, 0o600))
 	done := make(chan error, 1)
 	go func() {
 		file, err := openTimingSourceFile(path)

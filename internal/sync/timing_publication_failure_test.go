@@ -25,7 +25,7 @@ func TestFailedFullContentDoesNotPublishTiming(t *testing.T) {
 			path := filepath.Join(root, "rollout-2026-10-01T00-00-00-"+codexTimingID+".jsonl")
 			prefix, tail := codexTimingRollout()
 			initial := prefix + tail
-			require.NoError(t, os.WriteFile(path, []byte(initial), 0600))
+			require.NoError(t, os.WriteFile(path, []byte(initial), 0o600))
 			database := openTestDB(t)
 			cfg := EngineConfig{AgentDirs: map[parser.AgentType][]string{parser.AgentCodex: {root}}, Machine: "local", DisableFilesystemProjectDiscovery: true, DiscardPendingWritesOnCancel: mode.bulk}
 			if mode.staged {
@@ -44,7 +44,7 @@ func TestFailedFullContentDoesNotPublishTiming(t *testing.T) {
 			beforeMessages, err := database.GetAllMessages(t.Context(), id)
 			require.NoError(t, err)
 			appendOnly := testjsonl.JoinJSONL(testjsonl.CodexMsgJSON("user", "Additional uncommitted request", "2026-10-01T01:00:00Z"), testjsonl.CodexMsgJSON("assistant", "Additional uncommitted answer", "2026-10-01T01:00:05Z"))
-			require.NoError(t, os.WriteFile(path, []byte(initial+appendOnly), 0600))
+			require.NoError(t, os.WriteFile(path, []byte(initial+appendOnly), 0o600))
 			_, err = raw.ExecContext(t.Context(), `CREATE TRIGGER reject_new_timing_content BEFORE INSERT ON messages WHEN NEW.content LIKE 'Additional uncommitted%' BEGIN SELECT RAISE(ABORT,'injected normalized content failure'); END`)
 			require.NoError(t, err)
 			engine.forceFullParse = true
@@ -75,7 +75,7 @@ func TestFailedTimingPublicationRetriesWithoutForce(t *testing.T) {
 	path := filepath.Join(root, "rollout-2026-10-01T00-00-00-"+codexTimingID+".jsonl")
 	prefix, tail := codexTimingRollout()
 	initial := prefix + tail
-	require.NoError(t, os.WriteFile(path, []byte(initial), 0600))
+	require.NoError(t, os.WriteFile(path, []byte(initial), 0o600))
 	database := openTestDB(t)
 	engine := NewEngine(t.Context(), database, EngineConfig{AgentDirs: map[parser.AgentType][]string{parser.AgentCodex: {root}}, Machine: "local", DisableFilesystemProjectDiscovery: true})
 	t.Cleanup(engine.Close)
@@ -87,7 +87,7 @@ func TestFailedTimingPublicationRetriesWithoutForce(t *testing.T) {
 	var beforeHash string
 	require.NoError(t, raw.QueryRowContext(t.Context(), "SELECT file_hash FROM session_timing_evidence WHERE session_id=?", id).Scan(&beforeHash))
 	additional := testjsonl.JoinJSONL(testjsonl.CodexMsgJSON("user", "Next request", "2026-10-01T01:00:00Z"), testjsonl.CodexMsgJSON("assistant", "Next answer", "2026-10-01T01:00:05Z"))
-	require.NoError(t, os.WriteFile(path, []byte(initial+additional), 0600))
+	require.NoError(t, os.WriteFile(path, []byte(initial+additional), 0o600))
 	_, err = raw.ExecContext(t.Context(), `CREATE TRIGGER reject_timing_publication BEFORE INSERT ON session_timing_evidence BEGIN SELECT RAISE(ABORT,'injected timing publication failure'); END`)
 	require.NoError(t, err)
 	engine.forceFullParse = true

@@ -26,7 +26,7 @@ func archivedTimingFixture(t *testing.T, d *DB) Session {
 		`{"timestamp":"2026-04-26T10:00:06Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"first"}}`,
 	}, "\n") + "\n"
 	path := filepath.Join(t.TempDir(), "rollout.jsonl")
-	require.NoError(t, os.WriteFile(path, []byte(source), 0600))
+	require.NoError(t, os.WriteFile(path, []byte(source), 0o600))
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	digest := sha256.Sum256([]byte(source))
@@ -167,7 +167,7 @@ func TestArchivedTimingIncrementalAppend(t *testing.T) {
 		`{"timestamp":"2026-04-26T11:00:02Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning"},"started_at_ms":1777201200000,"completed_at_ms":1777201202000}}`,
 		`{"timestamp":"2026-04-26T11:00:04Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"second"}}`,
 	}, "\n") + "\n"
-	f, err := os.OpenFile(*s.FilePath, os.O_APPEND|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(*s.FilePath, os.O_APPEND|os.O_WRONLY, 0o600)
 	require.NoError(t, err)
 	_, err = f.WriteString(tail)
 	require.NoError(t, err)
@@ -202,7 +202,7 @@ func TestArchivedTimingReplacementCopyKeepsOriginalEvidence(t *testing.T) {
 	require.NoError(t, err)
 	// Replace the source with a different valid snapshot under the same native ID.
 	replacement := `{"timestamp":"2026-04-26T12:00:00Z","type":"session_meta","payload":{"id":"retained"}}` + "\n"
-	require.NoError(t, os.WriteFile(*s.FilePath, []byte(replacement), 0600))
+	require.NoError(t, os.WriteFile(*s.FilePath, []byte(replacement), 0o600))
 	digest := sha256.Sum256([]byte(replacement))
 	hash := hex.EncodeToString(digest[:])
 	info, err := os.Stat(*s.FilePath)
@@ -243,7 +243,7 @@ func TestArchivedTimingContinuationPage(t *testing.T) {
 				encoder.Close()
 				path += ".zst"
 			}
-			require.NoError(t, os.WriteFile(path, bytes, 0600))
+			require.NoError(t, os.WriteFile(path, bytes, 0o600))
 			info, err := os.Stat(path)
 			require.NoError(t, err)
 			digest := sha256.Sum256(bytes)

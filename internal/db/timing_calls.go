@@ -1,8 +1,9 @@
 package db
 
 import (
-	"go.kenn.io/agentsview/internal/parser"
 	"sort"
+
+	"go.kenn.io/agentsview/internal/parser"
 )
 
 // sourceTimedCalls attaches paired request/result waiting for aggregates and
