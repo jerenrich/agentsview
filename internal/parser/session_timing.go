@@ -79,6 +79,7 @@ type SessionTimingState struct {
 	LastActivity       int64
 	Prompt             int64
 	LastClaudeActivity int64
+	ClaudeComplete     bool
 	// Claude writes cumulative and additive snapshots under one message ID.
 	// Keep the current assistant run's observed calls across checkpoint resumes.
 	ClaudeMessageID    string
@@ -144,7 +145,7 @@ func (s *SessionTimingState) Snapshot(agent string) *SessionTimingEvidence {
 	if agent == string(AgentClaude) {
 		if s.Prompt > 0 {
 			out.Turns = append(out.Turns, TimingInterval{s.Prompt, max(s.Prompt, s.LastClaudeActivity)})
-			out.Open = true
+			out.Open = !s.ClaudeComplete
 		}
 	} else {
 		for _, start := range s.Starts {
@@ -435,8 +436,17 @@ func (s *SessionTimingState) consume(line []byte, agent, path string) error {
 		}
 		if kind == "attachment" {
 			if queued, ok := extractQueuedCommand(entry.Raw); ok && !queuedCommandMessage(queued).IsSystem {
+				// Queued prompts can arrive while the current tool is still
+				// outstanding. That wait remains active up to this boundary.
+				for _, started := range calls {
+					if s.Prompt > 0 && started >= s.Prompt && started <= stamp {
+						s.LastClaudeActivity = max(s.LastClaudeActivity, stamp)
+						break
+					}
+				}
 				s.closeClaude()
 				s.Prompt, s.LastClaudeActivity = stamp, 0
+				s.ClaudeComplete = false
 			}
 			return nil
 		}
@@ -487,20 +497,28 @@ func (s *SessionTimingState) consume(line []byte, agent, path string) error {
 			// context, and task notifications as user entries. Match the
 			// provider's classification so these do not split a real turn.
 			text, skip := preprocessClaudeUserText(extractCompactSummary(entry.Raw))
-			if skip || classifyClaudeSystemMessage(text) != "" {
+			if skip || strings.TrimSpace(text) == "" || isClaudeSystemMessage(text) {
 				return nil
 			}
 			s.closeClaude()
 			s.Prompt, s.LastClaudeActivity = stamp, 0
+			s.ClaudeComplete = false
 		}
 		// A tool result proves activity even if the process stops before
 		// another assistant message is written. Keep its known waiting
 		// interval inside this turn without extending it to wall time.
 		if kind == "user" && isResult {
 			s.LastClaudeActivity = max(s.LastClaudeActivity, stamp)
+			s.ClaudeComplete = false
 		}
 		if kind == "assistant" {
 			s.LastClaudeActivity = max(s.LastClaudeActivity, stamp)
+			switch entry.Get("message.stop_reason").Str {
+			case "end_turn", "max_tokens", "stop_sequence":
+				s.ClaudeComplete = true
+			default:
+				s.ClaudeComplete = false
+			}
 			if duration := entry.Get("thinkingDurationMs").Int(); duration > 0 && duration <= stamp {
 				out.Model = append(out.Model, TimingInterval{stamp - duration, stamp})
 			}

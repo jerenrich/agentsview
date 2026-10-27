@@ -8,6 +8,7 @@ class LiveTickStore {
   now: number = $state(Date.now());
 
   private timer: ReturnType<typeof setInterval> | null = null;
+  private refreshedAt = 0;
 
   constructor() {
     $effect.root(() => {
@@ -16,8 +17,15 @@ class LiveTickStore {
         if (running) {
           if (this.timer == null) {
             this.now = Date.now();
+            this.refreshedAt = this.now;
             this.timer = setInterval(() => {
               this.now = Date.now();
+              // A quiet or stopped source emits no timing event. Recheck the
+              // server's bounded liveness instead of extrapolating forever.
+              if (this.now - this.refreshedAt >= 30000) {
+                this.refreshedAt = this.now;
+                void sessionTiming.refresh();
+              }
             }, 1000);
           }
         } else if (this.timer != null) {

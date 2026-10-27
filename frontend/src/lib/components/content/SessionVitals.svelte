@@ -214,6 +214,14 @@
     );
   });
 
+  let totalDurationMs = $derived.by(() => {
+    if (!timing) return 0;
+    const snapshotActive = timing.active_duration_ms ?? timing.activity.reduce(
+      (sum, activity) => sum + activity.duration_ms, 0,
+    );
+    return timing.total_duration_ms + Math.max(0, activeDurationMs - snapshotActive);
+  });
+
   function activityValue(
     activity: TurnActivity,
     kind: ActivityKind,
@@ -355,7 +363,7 @@
         {#if timing}
           <span class="v-meta" class:live={timing.running}>
             {#if timing.running}
-              {m.session_vitals_running_duration({ duration: formatDuration(timing.total_duration_ms) })}
+              {m.session_vitals_running_duration({ duration: formatDuration(totalDurationMs) })}
             {:else}
               {formatDuration(timing.total_duration_ms)}
             {/if}
@@ -727,11 +735,11 @@
         {#if ui.vitalsCallsExpanded}
           <div class="scale-axis">
             <span>0</span>
-            <span>{formatDuration(timing.total_duration_ms / 4)}</span>
-            <span>{formatDuration(timing.total_duration_ms / 2)}</span>
+            <span>{formatDuration(totalDurationMs / 4)}</span>
+            <span>{formatDuration(totalDurationMs / 2)}</span>
             <span
               >{formatDuration(
-                (3 * timing.total_duration_ms) / 4,
+                (3 * totalDurationMs) / 4,
               )}</span
             >
             <span class:now={timing.running}

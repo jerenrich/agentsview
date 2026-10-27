@@ -135,7 +135,7 @@ func TestTimingUpgradeIncludesUpstreamAndPreviewVersions(t *testing.T) {
 }
 
 func TestTimingRepairUpgradePreservesRetainedArchive(t *testing.T) {
-	const previous = 152
+	const previous = 153
 	assert.ElementsMatch(t, []parser.AgentType{parser.AgentClaude, parser.AgentCodex},
 		ScopedDataVersionProviders(previous, previous+1))
 	d := testDB(t)

@@ -260,6 +260,13 @@ evidence before their pending metadata write and publish it only after normalize
 content commits, verifying the full source binding again under the writer lock.
 Pending supported-provider rows stay stale until all required writes succeed,
 so content or publication failures retry without claiming persisted timing.
+`session_timing_pending` retains the prior source binding, timing bounds, and
+transcript revision during a non-atomic full import. While that revision still
+owns the committed messages, reads use its saved evidence, including after
+restart or source deletion. If new content commits before timing publication,
+reads report unavailable source timing until publication succeeds. Pending
+imports never read the newly bound source as a fallback. Successful publication
+or an atomic write clears the pending row; archive preservation copies it.
 Captures use the imported byte
 prefix, validate its SHA-256 when available, and share bounded scans and caches.
 
@@ -302,6 +309,9 @@ Data version 153 reparses only local Claude and Codex sources in place to repair
 queued-prompt and compact-summary boundaries, cumulative Claude tool snapshots,
 and stale rejections after source replacement. Sources that are gone retain
 their archived content and timing evidence.
+Data version 154 repairs queued tool-wait boundaries and ignored user records
+in local Claude timing, and retries Claude and Codex timing with committed
+source bindings. It preserves existing source, session, and message identities.
 Forced mtime resets preserve currently valid evidence and invalidate mismatched
 records before rebinding; source deletion cannot turn a reset into timing loss.
 Timing reads load session bounds, messages, calls, and saved evidence from one
@@ -315,6 +325,14 @@ assigned to model or tools remains unattributed. Idle gaps between recorded turn
 are excluded. Claude turn endpoints conservatively follow the last observed
 assistant or tool result in its source format. Provider-classified system entries never split those turns. The total
 timeline preserves the combined extent of session metadata and recorded tasks.
+Source ownership uses a separate projection of fork relationships and paths,
+including trashed forks. Sidebar child summaries are not ownership evidence.
+Recent unfinished Claude and Codex turns can run despite a populated `ended_at`,
+which records the last observation rather than completion. Extrapolation uses
+the existing ten-minute activity window and requires an unchanged, available
+source. Completed, stale, and source-deleted sessions retain observed bounds.
+The live client rechecks quiet snapshots every thirty seconds so it stops
+extrapolating when a source goes stale without emitting an update.
 
 This table is local archive metadata and is not published to SQL mirrors or
 conversation exports. Transient `Session.TimingCapture` also stays out of hosted
@@ -343,6 +361,10 @@ evidence remains available without a checkpoint or source file.
 Checkpoint version 3 also retains the active Claude assistant message ID and
 its tool-call IDs, so cumulative snapshots do not become ambiguous requests.
 Older cursors fall back to a cold capture using the corrected prompt rules.
+Checkpoint version 4 preserves activity up to a queued prompt when a current
+tool request is still pending, ignores canonical user-noise records, and keeps
+explicit Claude completion state. The pending-read table is also optional for
+read-only archives created before it existed; writable opens add it in place.
 
 Resumed hashing is checked against the canonical ingestion hash before accepting
 evidence. This proves agreement with the imported snapshot; validation of the

@@ -140,6 +140,15 @@ evidence; they do not establish whether a tool helped the task.
 
 ## Claude Code (`claude`)
 
+- **Queued waiting and prompt noise (2026-10-27):** Reverified full ingestion,
+  failed-write reads, and every-byte checkpoint restarts. Queued prompts can
+  arrive while a tool waits; the previous active window then reaches the
+  queued boundary rather than inventing an idle gap. Whitespace-only users and
+  unclassified local-command envelopes follow the canonical parser's noise
+  rules. Explicit assistant `stop_reason` completion ends live timing. Data
+  version 154 reparses these timing semantics in place; checkpoint version 4
+  rebuilds prior reducer cursors without retaining transcript bodies.
+
 - **Timing parser parity (2026-10-27):** Reverified queued prompt attachments,
   explicit `isCompactSummary` boundaries, and cumulative assistant snapshots
   against normalized ingestion and checkpoint/restart fixtures. Queued human

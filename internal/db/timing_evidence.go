@@ -118,10 +118,11 @@ func (db *DB) PrepareSessionTimingEvidence(ctx context.Context, s Session) Sessi
 // Pending session upserts must not publish this evidence before their separately
 // committed content, and a concurrent source replacement must not receive it.
 func (db *DB) PublishSessionTimingEvidence(ctx context.Context, s Session) error {
+	s = db.sessionForStorage(s)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if s.TimingCapture == nil {
+	if s.TimingCapture == nil && s.Agent != "codex" && s.Agent != "claude" {
 		return nil
 	}
 	if err := db.requireWritable(); err != nil {
@@ -144,11 +145,16 @@ func (db *DB) PublishSessionTimingEvidence(ctx context.Context, s Session) error
 	if err != nil {
 		return fmt.Errorf("checking timing publication source: %w", err)
 	}
-	if deletedAt != nil || !timingEvidenceMatchesSession(s.TimingCapture, &current) {
+	binding := bindTimingRecord(&timingEvidenceRecord{}, &s)
+	if deletedAt != nil || !timingEvidenceMatchesSession(binding, &current) ||
+		s.TimingCapture != nil && !timingEvidenceMatchesSession(s.TimingCapture, &current) {
 		return ErrSessionChanged
 	}
 	if err := writeTimingEvidence(ctx, tx.ExecContext, s.ID, s.TimingCapture); err != nil {
 		return fmt.Errorf("publishing timing evidence: %w", err)
+	}
+	if err := clearPendingTimingRead(ctx, tx.ExecContext, s.ID); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing timing evidence: %w", err)

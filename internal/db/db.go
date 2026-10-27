@@ -618,7 +618,9 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // whose independently allocated versions overlapped 148-151.)
 // (153: repair Claude queued-prompt, compact-summary, and cumulative-call timing,
 // and stale timing rejections on replaced Claude and Codex sources in place.)
-const dataVersion = 153
+// (154: repair queued tool-wait and ignored-user timing boundaries and retry
+// timing publication with committed source bindings for Claude and Codex.)
+const dataVersion = 154
 
 const archiveOnlyVersionBase = 1 << 20
 

@@ -125,7 +125,11 @@ func (db *DB) getSessionTiming(ctx context.Context, sessionID string, afterSessi
 	if afterSession != nil {
 		afterSession()
 	}
-	turns, err := queryTimingTurnRows(ctx, tx, sessionID)
+	pending, committed, err := restorePendingTimingRead(ctx, tx, sess)
+	if err != nil {
+		return nil, err
+	}
+	turns, err := queryTimingTurnRows(ctx, tx, sessionID, sess.EndedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -133,17 +137,21 @@ func (db *DB) getSessionTiming(ctx context.Context, sessionID string, afterSessi
 	if err != nil {
 		return nil, err
 	}
-	source, rejected, err := storedTimingEvidenceWithQuerier(ctx, tx, sess)
-	if err != nil {
-		return nil, err
+	var source *parser.SessionTimingEvidence
+	var rejected bool
+	if committed {
+		source, rejected, err = storedTimingEvidenceWithQuerier(ctx, tx, sess)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("closing timing snapshot: %w", err)
 	}
 	persisted := source != nil
-	if source == nil && !rejected {
+	if source == nil && !rejected && !pending {
 		// A saved rejection is authoritative for this source binding.
-		source, err = readOwnedTimingSource(ctx, sess, db.GetChildSessions)
+		source, err = readOwnedTimingSource(ctx, sess, db.timingSourceChildren)
 		if err != nil {
 			return nil, err
 		}
@@ -151,7 +159,23 @@ func (db *DB) getSessionTiming(ctx context.Context, sessionID string, afterSessi
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if pending {
+		// An in-flight import is not evidence of current runtime activity.
+		if source != nil {
+			copy := *source
+			copy.Open = false
+			source = &copy
+		}
+	} else {
+		source = timingEvidenceForLiveSource(sess, source)
+	}
 	out := AssembleTiming(sess, turns, calls, time.Now().UTC(), source)
+	if pending {
+		out.Running = false
+		for i := range out.Activity {
+			out.Activity[i].Running = false
+		}
+	}
 	if persisted {
 		out.Coverage.Evidence = "persisted"
 	}
@@ -159,7 +183,7 @@ func (db *DB) getSessionTiming(ctx context.Context, sessionID string, afterSessi
 }
 
 func queryTimingTurnRows(
-	ctx context.Context, q messageRowsQuerier, sessionID string,
+	ctx context.Context, q messageRowsQuerier, sessionID string, endedAt *string,
 ) ([]TurnRow, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT
@@ -180,7 +204,7 @@ func queryTimingTurnRows(
 		        (julianday(
 		          COALESCE(
 		            LEAD(m.timestamp) OVER (ORDER BY m.ordinal),
-		            s.ended_at
+		            ?
 		          )
 		        ) - julianday(m.timestamp)) * 86400000
 		      ) AS INTEGER
@@ -190,7 +214,7 @@ func queryTimingTurnRows(
 		  WHERE m.session_id = ?
 		) m2
 		ORDER BY m2.ordinal
-	`, sessionID)
+	`, endedAt, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -338,6 +362,9 @@ func AssembleTiming(
 	if len(evidence) > 0 {
 		source = evidence[0]
 	}
+	if sourceTimingRunning(sess, turns, source, now) {
+		out.Running = true
+	}
 	calls = sourceTimedCalls(turns, calls, source)
 	intervals := assembleTurnActivity(out, sess, turns, calls, now, source)
 	callsByMsg := map[int64][]CallTiming{}
@@ -396,6 +423,35 @@ func AssembleTiming(
 	}
 	timingCoverage(out, sess, source, false)
 	return out
+}
+
+// EndedAt is the last observed source timestamp, not a completion marker.
+// An unfinished native turn is live only within the existing activity window.
+// Historical unfinished turns retain their observed bounds. Claude transcripts
+// without a stop reason also use the last visible final answer conservatively.
+func sourceTimingRunning(sess *Session, turns []TurnRow, source *parser.SessionTimingEvidence, now time.Time) bool {
+	if source == nil || !source.Open || len(source.Turns) == 0 || sess.Agent != "codex" && sess.Agent != "claude" {
+		return false
+	}
+	last := source.Turns[len(source.Turns)-1].End
+	if now.UnixMilli() < last || now.Sub(time.UnixMilli(last)) >= activeWindow {
+		return false
+	}
+	if sess.Agent == "claude" {
+		for i := len(turns) - 1; i >= 0; i-- {
+			row := turns[i]
+			if row.IsSystem || row.IsSystemPrefixed {
+				continue
+			}
+			if row.Role == "assistant" {
+				return row.HasToolUse
+			}
+			if row.Role == "user" {
+				return true
+			}
+		}
+	}
+	return true
 }
 
 // Resolve complete groups once; scanning every call again for every tool

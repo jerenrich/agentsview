@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"io"
 	"os"
@@ -28,8 +29,33 @@ var timingSources struct {
 	entries []timingSourceEntry
 }
 
-// ChildSessionsFunc lists a session's direct children from the same store.
+// ChildSessionsFunc lists a session's direct children with source paths,
+// including trashed children whose records still occupy the source file.
 type ChildSessionsFunc func(ctx context.Context, parentID string) ([]Session, error)
+
+func (db *DB) timingSourceChildren(ctx context.Context, parentID string) ([]Session, error) {
+	rows, err := db.getReader().QueryContext(ctx, `SELECT file_path, relationship_type
+ FROM sessions WHERE parent_session_id=? AND relationship_type='fork'`, parentID)
+	if err != nil {
+		return nil, err
+	}
+	return ScanTimingSourceChildren(rows)
+}
+
+// ScanTimingSourceChildren reads the minimal ownership projection shared by
+// archive and mirror timing reads. It owns and closes rows.
+func ScanTimingSourceChildren(rows *sql.Rows) ([]Session, error) {
+	defer rows.Close()
+	var children []Session
+	for rows.Next() {
+		var child Session
+		if err := rows.Scan(&child.FilePath, &child.RelationshipType); err != nil {
+			return nil, err
+		}
+		children = append(children, child)
+	}
+	return children, rows.Err()
+}
 
 // AssembleTimingContext enriches every store's timing with the same optional
 // local source evidence. Sources are never modified. Missing, remote, replaced,
@@ -46,7 +72,27 @@ func AssembleTimingContext(ctx context.Context, sess *Session, turns []TurnRow, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return AssembleTiming(sess, turns, calls, now, evidence), nil
+	return AssembleTiming(sess, turns, calls, now, timingEvidenceForLiveSource(sess, evidence)), nil
+}
+
+// Archived evidence remains readable without a log, but cannot prove that its
+// process is still running. A replaced or not-yet-imported source stays bounded
+// until ingestion commits its new snapshot.
+func timingEvidenceForLiveSource(sess *Session, evidence *parser.SessionTimingEvidence) *parser.SessionTimingEvidence {
+	if evidence == nil || !evidence.Open {
+		return evidence
+	}
+	available := false
+	if sess.FilePath != nil && sess.FileSize != nil && sess.FileMtime != nil {
+		info, err := os.Stat(*sess.FilePath)
+		available = err == nil && info.Mode().IsRegular() && info.Size() >= *sess.FileSize && info.ModTime().UnixNano() == *sess.FileMtime
+	}
+	if available {
+		return evidence
+	}
+	copy := *evidence
+	copy.Open = false
+	return &copy
 }
 
 // readOwnedTimingSource reads source evidence only when the whole file can be

@@ -24,10 +24,10 @@ class SessionTimingStore {
    *  calling load() again for the same session is a no-op once a
    *  snapshot is in memory. Concurrent callers share the pending request.
    *  SSE events update the cached snapshot in place. */
-  load(sessionId: string): Promise<void> {
+  load(sessionId: string, refresh = false): Promise<void> {
     if (this.currentSessionId === sessionId) {
       if (this.pendingLoad) return this.pendingLoad;
-      if (this.timing !== null) return Promise.resolve();
+      if (this.timing !== null && !refresh) return Promise.resolve();
     }
     if (this.currentSessionId !== sessionId) {
       this.timing = null;
@@ -49,6 +49,13 @@ class SessionTimingStore {
     this.pendingLoad = pending;
     void this.readSnapshot(sessionId, version, signal).then(resolve, reject);
     return pending;
+  }
+
+  /** Recheck liveness even when the source stops emitting stream updates. */
+  refresh(): Promise<void> {
+    return this.currentSessionId === null
+      ? Promise.resolve()
+      : this.load(this.currentSessionId, true);
   }
 
   private async readSnapshot(

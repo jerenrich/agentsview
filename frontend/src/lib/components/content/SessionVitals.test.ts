@@ -524,6 +524,7 @@ describe("SessionVitals", () => {
       expect(document.querySelector(".activity-section .v-meta")?.textContent).toBe(
         "Active · 1m 3s",
       );
+      expect(document.querySelector(".v-section .v-meta")?.textContent).toBe("running 2m 3s+");
       expect(document.querySelector(".activity-totals")?.textContent).toContain(
         "Unattributed · 1m 3s",
       );

@@ -43,6 +43,22 @@ beforeEach(() => {
 });
 
 describe("SessionTimingStore", () => {
+  it("refreshes a cached live snapshot and shares an in-flight liveness check", async () => {
+    const initial = { ...timing("s1", 5000), running: true };
+    timingMocks.fetchSessionTiming.mockResolvedValueOnce(initial);
+    await sessionTiming.load("s1");
+    const request = deferred<SessionTiming>();
+    timingMocks.fetchSessionTiming.mockReturnValueOnce(request.promise);
+    const refreshed = sessionTiming.refresh();
+    expect(sessionTiming.refresh()).toBe(refreshed);
+    expect(sessionTiming.timing).toEqual(initial);
+    const completed = timing("s1", 6000);
+    request.resolve(completed);
+    await refreshed;
+    expect(timingMocks.fetchSessionTiming).toHaveBeenCalledTimes(2);
+    expect(sessionTiming.timing?.running).toBe(false);
+  });
+
   it("shares one pending request and completion between App and panel callers", async () => {
     const request = deferred<SessionTiming>();
     timingMocks.fetchSessionTiming.mockReturnValue(request.promise);

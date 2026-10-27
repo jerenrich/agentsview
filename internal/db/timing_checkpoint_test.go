@@ -268,6 +268,8 @@ func TestTimingCheckpointUpgradeDoesNotRequireResync(t *testing.T) {
 			// Recreate a pre-checkpoint archive with retained evidence and no logs.
 			_, err = d.getWriter().Exec(t.Context(), "DROP TABLE session_timing_checkpoints")
 			require.NoError(t, err)
+			_, err = d.getWriter().Exec(t.Context(), "DROP TABLE session_timing_pending")
+			require.NoError(t, err)
 			require.NoError(t, os.Remove(*s.FilePath))
 			if archiveOnly {
 				require.NoError(t, d.EnableArchiveOnly(t.Context()))

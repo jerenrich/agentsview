@@ -1667,6 +1667,12 @@ CREATE TABLE IF NOT EXISTS session_timing_evidence (
  evidence TEXT NOT NULL
 );
 
+-- Committed timing read binding while a non-atomic full import is pending.
+CREATE TABLE IF NOT EXISTS session_timing_pending (
+ session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+ snapshot TEXT NOT NULL
+);
+
 -- Disposable local timing continuation state; evidence remains the archive.
 CREATE TABLE IF NOT EXISTS session_timing_checkpoints (
  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,

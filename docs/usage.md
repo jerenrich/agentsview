@@ -997,9 +997,11 @@ windows as estimates: missing completion records can still include idle time. In
 recorded execution, request-to-result waiting, or a linked subagent lifetime. Forked and subagent sources use that fallback to avoid mixing replayed
 parent activity into child sessions. This includes Claude transcripts that also
 hold an in-file fork or a replayed parent prefix: neither the main session nor
-the fork receives whole-file timing. In a live session, the newest unfinished
-turn keeps running until now, including a Claude prompt that has no response
-yet.
+the fork receives whole-file timing. While a source is available and its last
+activity is less than ten minutes old, the newest unfinished turn keeps running
+until now, including a Claude prompt that has no response yet. This live elapsed
+time is provisional; completed, stale, or source-deleted sessions use recorded
+bounds. Quiet live snapshots are rechecked every thirty seconds.
 
 Individual calls prefer explicit execution endpoints or a closed linked child;
 paired request/result latency supplies a duration when execution is unavailable.

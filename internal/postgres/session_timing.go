@@ -37,7 +37,16 @@ func (s *Store) GetSessionTiming(
 	if err != nil {
 		return nil, err
 	}
-	return db.AssembleTimingContext(ctx, sess, turnRows, callRows, time.Now().UTC(), s.GetChildSessions)
+	return db.AssembleTimingContext(ctx, sess, turnRows, callRows, time.Now().UTC(), s.timingSourceChildren)
+}
+
+func (s *Store) timingSourceChildren(ctx context.Context, parentID string) ([]db.Session, error) {
+	rows, err := s.pg.QueryContext(ctx, `SELECT file_path, relationship_type
+ FROM sessions WHERE parent_session_id=$1 AND relationship_type='fork'`, parentID)
+	if err != nil {
+		return nil, err
+	}
+	return db.ScanTimingSourceChildren(rows)
 }
 
 func (s *Store) queryTurnRows(

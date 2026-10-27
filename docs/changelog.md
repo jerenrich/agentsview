@@ -60,6 +60,11 @@ The latest release is
 
 **Bug fixes**
 
+- Unfinished Claude and Codex sessions now advance their live timing after real
+  ingestion. Completed and stale work stays bounded. Queued prompts preserve
+  ongoing tool waits, and ignored command output no longer invents turns.
+  Failed imports retain committed timing through restart and source cleanup;
+  source-only reads also exclude activity from visible or trashed forks.
 - Claude activity timing recognizes queued prompts, ignores compact summaries
   as prompt boundaries, and preserves tool waits across cumulative assistant
   snapshots. Timing can recover after a source replacement, and the live

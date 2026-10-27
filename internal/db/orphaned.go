@@ -2322,6 +2322,13 @@ func copySessionDataForIDs(
 			return fmt.Errorf("copying timing evidence: %w", err)
 		}
 	}
+	if oldDBHasTable(ctx, tx, "session_timing_pending") {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO main.session_timing_pending(session_id, snapshot)
+ SELECT copied.id, p.snapshot FROM old_db.session_timing_pending p
+ JOIN `+tempIDsTable+` copied ON copied.source_id=p.session_id`); err != nil {
+			return fmt.Errorf("copying pending timing bindings: %w", err)
+		}
+	}
 	if oldDBHasTable(ctx, tx, "claude_subagent_sources") {
 		if _, err := tx.ExecContext(ctx,
 			"INSERT OR IGNORE INTO claude_subagent_sources (session_id, file_path) "+

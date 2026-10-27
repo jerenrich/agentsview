@@ -1799,6 +1799,13 @@ func upsertSessionExec(
 		}
 	}
 	result.sourceMissing = sourceMissingAt.Valid
+	var pendingTiming *timingReadSnapshot
+	if !reviveSourceMissing && (s.Agent == "codex" || s.Agent == "claude") {
+		pendingTiming, err = previousTimingReadSnapshot(ctx, queryRow, s.ID)
+		if err != nil {
+			return sessionUpsertResult{}, err
+		}
+	}
 
 	// data_version is intentionally NOT advanced here. The
 	// caller must call SetSessionDataVersion only after the
@@ -1820,6 +1827,13 @@ func upsertSessionExec(
 			fmt.Errorf("upserting session %s: %w", s.ID, err)
 	}
 	if err := writeTimingEvidence(ctx, exec, s.ID, s.TimingCapture); err != nil {
+		return sessionUpsertResult{}, err
+	}
+	if pendingTiming != nil {
+		if err := savePendingTimingRead(ctx, exec, s.ID, pendingTiming); err != nil {
+			return sessionUpsertResult{}, err
+		}
+	} else if err := clearPendingTimingRead(ctx, exec, s.ID); err != nil {
 		return sessionUpsertResult{}, err
 	}
 	if !reviveSourceMissing && (s.Agent == "codex" || s.Agent == "claude") {
@@ -3386,7 +3400,10 @@ func updateSessionIncrementalTx(ctx context.Context,
 			"incremental update session %s: updated %d rows", id, rows,
 		)
 	}
-	return writeTimingEvidence(ctx, tx.ExecContext, id, update.TimingCapture)
+	if err := writeTimingEvidence(ctx, tx.ExecContext, id, update.TimingCapture); err != nil {
+		return err
+	}
+	return clearPendingTimingRead(ctx, tx.ExecContext, id)
 }
 
 // messageRangeTotals is what the rows at or after one ordinal contribute
@@ -3504,7 +3521,10 @@ func replaceSessionIncrementalTx(ctx context.Context,
 			"ranged replacement update session %s: updated %d rows", id, rows,
 		)
 	}
-	return writeTimingEvidence(ctx, tx.ExecContext, id, update.TimingCapture)
+	if err := writeTimingEvidence(ctx, tx.ExecContext, id, update.TimingCapture); err != nil {
+		return err
+	}
+	return clearPendingTimingRead(ctx, tx.ExecContext, id)
 }
 
 func (db *DB) UpdateSessionIncremental(ctx context.Context,

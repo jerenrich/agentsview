@@ -283,13 +283,15 @@ func TestSourceTimingOpenTurnRunsUntilNow(t *testing.T) {
 		endedAt *string
 		running bool
 		active  int64
+		at      time.Time
 	}{
-		{"running session", nil, true, 5000 + 120000},
-		{"ended session", new("2026-04-26T10:10:00Z"), false, 5000},
+		{"running session", nil, true, 5000 + 120000, now},
+		{"dated unfinished session", new("2026-04-26T10:10:00Z"), true, 5000 + 120000, now},
+		{"stale unfinished session", new("2026-04-26T10:10:00Z"), false, 5000, now.Add(20 * time.Minute)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sess := &Session{ID: "s", Agent: "claude", StartedAt: new("2026-04-26T10:00:00Z"), EndedAt: tc.endedAt}
-			got := AssembleTiming(sess, turns, nil, now, evidence)
+			got := AssembleTiming(sess, turns, nil, tc.at, evidence)
 			require.Equal(t, "source", got.TimingSource)
 			require.Len(t, got.Activity, 2, "an unanswered prompt keeps its activity row")
 			assert.False(t, got.Activity[0].Running)

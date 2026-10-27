@@ -88,4 +88,17 @@ func TestClaudeForkTimingIsNotSharedAcrossSessions(t *testing.T) {
 	for _, row := range mainTiming.Activity {
 		assert.NotEqual(t, "2026-04-26T11:00:00Z", row.StartedAt, "the main session must not absorb the fork's turn")
 	}
+	// Source-only readers and older archives have no durable decision. Their
+	// ownership lookup must load paths, including a fork retained in the trash.
+	_, err = raw.ExecContext(t.Context(), "DELETE FROM session_timing_evidence")
+	require.NoError(t, err)
+	for _, trashed := range []bool{false, true} {
+		if trashed {
+			require.NoError(t, database.SoftDeleteSession(t.Context(), forkID))
+		}
+		fallback, err := database.GetSessionTiming(t.Context(), sessionID)
+		require.NoError(t, err)
+		assert.Empty(t, fallback.TimingSource)
+		assert.Equal(t, mainTiming.ActiveDurationMs, fallback.ActiveDurationMs)
+	}
 }
