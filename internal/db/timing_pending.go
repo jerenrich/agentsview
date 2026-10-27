@@ -87,3 +87,22 @@ func restorePendingTimingRead(ctx context.Context, q recallQueryRower, s *Sessio
 	}
 	return true, false, nil
 }
+
+// New committed content can outlive a failed timing publication. Only its
+// normalized timestamps, not pending source bounds or wall time, own this read.
+func boundPendingTimingRead(s *Session, turns []TurnRow) {
+	s.StartedAt, s.EndedAt = nil, nil
+	var first, last int64
+	for _, row := range turns {
+		stamp, ok := timingTimestamp(row.Timestamp)
+		if !ok {
+			continue
+		}
+		if s.StartedAt == nil || stamp < first {
+			first, s.StartedAt = stamp, new(row.Timestamp)
+		}
+		if s.EndedAt == nil || stamp > last {
+			last, s.EndedAt = stamp, new(row.Timestamp)
+		}
+	}
+}

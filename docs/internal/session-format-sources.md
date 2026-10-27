@@ -140,6 +140,15 @@ evidence; they do not establish whether a tool helped the task.
 
 ## Claude Code (`claude`)
 
+- **Repeated queues and interruptions (2026-10-27):** Reverified full and
+  incremental native ingestion, source deletion, and every-byte checkpoint
+  restarts. Two queued prompts during one outstanding tool call preserve the
+  entire wait across both boundaries. Canonical `interrupted` system-user
+  markers close the active turn at their timestamp, stop live extrapolation,
+  and cancel pending timing requests without creating a human prompt. Data
+  version 155 reparses local Claude timing with identities preserved;
+  checkpoint version 5 rebuilds earlier reducer cursors.
+
 - **Queued waiting and prompt noise (2026-10-27):** Reverified full ingestion,
   failed-write reads, and every-byte checkpoint restarts. Queued prompts can
   arrive while a tool waits; the previous active window then reaches the

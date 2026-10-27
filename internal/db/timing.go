@@ -129,9 +129,16 @@ func (db *DB) getSessionTiming(ctx context.Context, sessionID string, afterSessi
 	if err != nil {
 		return nil, err
 	}
-	turns, err := queryTimingTurnRows(ctx, tx, sessionID, sess.EndedAt)
+	endedAt := sess.EndedAt
+	if pending && !committed {
+		endedAt = nil
+	}
+	turns, err := queryTimingTurnRows(ctx, tx, sessionID, endedAt)
 	if err != nil {
 		return nil, err
+	}
+	if pending && !committed {
+		boundPendingTimingRead(sess, turns)
 	}
 	calls, err := queryTimingCallRows(ctx, tx, sessionID)
 	if err != nil {
@@ -169,13 +176,7 @@ func (db *DB) getSessionTiming(ctx context.Context, sessionID string, afterSessi
 	} else {
 		source = timingEvidenceForLiveSource(sess, source)
 	}
-	out := AssembleTiming(sess, turns, calls, time.Now().UTC(), source)
-	if pending {
-		out.Running = false
-		for i := range out.Activity {
-			out.Activity[i].Running = false
-		}
-	}
+	out := assembleTiming(sess, turns, calls, time.Now().UTC(), !pending, source)
 	if persisted {
 		out.Coverage.Evidence = "persisted"
 	}
@@ -336,7 +337,13 @@ func queryTimingCallRows(
 func AssembleTiming(
 	sess *Session, turns []TurnRow, calls []CallRow, now time.Time, evidence ...*parser.SessionTimingEvidence,
 ) *SessionTiming {
-	running := sess.EndedAt == nil || *sess.EndedAt == ""
+	return assembleTiming(sess, turns, calls, now, true, evidence...)
+}
+
+func assembleTiming(
+	sess *Session, turns []TurnRow, calls []CallRow, now time.Time, allowLive bool, evidence ...*parser.SessionTimingEvidence,
+) *SessionTiming {
+	running := allowLive && (sess.EndedAt == nil || *sess.EndedAt == "")
 
 	out := &SessionTiming{
 		SessionID:  sess.ID,
@@ -352,7 +359,7 @@ func AssembleTiming(
 		out.TotalDurationMs = millisBetween(
 			*sess.StartedAt, *sess.EndedAt,
 		)
-	default:
+	case allowLive:
 		out.TotalDurationMs = millisBetween(
 			*sess.StartedAt, now.Format(time.RFC3339),
 		)
@@ -362,7 +369,7 @@ func AssembleTiming(
 	if len(evidence) > 0 {
 		source = evidence[0]
 	}
-	if sourceTimingRunning(sess, turns, source, now) {
+	if allowLive && sourceTimingRunning(sess, turns, source, now) {
 		out.Running = true
 	}
 	calls = sourceTimedCalls(turns, calls, source)

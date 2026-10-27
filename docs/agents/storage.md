@@ -264,7 +264,9 @@ so content or publication failures retry without claiming persisted timing.
 transcript revision during a non-atomic full import. While that revision still
 owns the committed messages, reads use its saved evidence, including after
 restart or source deletion. If new content commits before timing publication,
-reads report unavailable source timing until publication succeeds. Pending
+reads report unavailable source timing until publication succeeds. Their bounds
+come from committed normalized messages, and live extrapolation is disabled
+before durations are assembled, including a failed first import. Pending
 imports never read the newly bound source as a fallback. Successful publication
 or an atomic write clears the pending row; archive preservation copies it.
 Captures use the imported byte
@@ -312,6 +314,8 @@ their archived content and timing evidence.
 Data version 154 repairs queued tool-wait boundaries and ignored user records
 in local Claude timing, and retries Claude and Codex timing with committed
 source bindings. It preserves existing source, session, and message identities.
+Data version 155 repairs repeated queued waits and explicit Claude interruptions
+in place. Missing sources retain their saved evidence and identities.
 Forced mtime resets preserve currently valid evidence and invalidate mismatched
 records before rebinding; source deletion cannot turn a reset into timing loss.
 Timing reads load session bounds, messages, calls, and saved evidence from one
@@ -330,7 +334,8 @@ including trashed forks. Sidebar child summaries are not ownership evidence.
 Recent unfinished Claude and Codex turns can run despite a populated `ended_at`,
 which records the last observation rather than completion. Extrapolation uses
 the existing ten-minute activity window and requires an unchanged, available
-source. Completed, stale, and source-deleted sessions retain observed bounds.
+source. Completed, explicitly interrupted, stale, and source-deleted sessions
+retain observed bounds.
 The live client rechecks quiet snapshots every thirty seconds so it stops
 extrapolating when a source goes stale without emitting an update.
 
@@ -363,8 +368,10 @@ its tool-call IDs, so cumulative snapshots do not become ambiguous requests.
 Older cursors fall back to a cold capture using the corrected prompt rules.
 Checkpoint version 4 preserves activity up to a queued prompt when a current
 tool request is still pending, ignores canonical user-noise records, and keeps
-explicit Claude completion state. The pending-read table is also optional for
-read-only archives created before it existed; writable opens add it in place.
+explicit Claude completion state. Checkpoint version 5 carries waiting across
+repeated queued prompts, retains the original request-owning prompt boundary,
+and closes explicit Claude interruptions. The pending-read table is also optional
+for read-only archives created before it existed; writable opens add it in place.
 
 Resumed hashing is checked against the canonical ingestion hash before accepting
 evidence. This proves agreement with the imported snapshot; validation of the

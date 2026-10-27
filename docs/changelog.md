@@ -60,6 +60,11 @@ The latest release is
 
 **Bug fixes**
 
+- Claude timing stops when a request is explicitly interrupted and preserves
+  tool waiting across multiple queued prompts. Failed initial timing publication
+  stays bounded to committed messages, and live timeline marks follow the same
+  advancing scale as their labels.
+
 - Unfinished Claude and Codex sessions now advance their live timing after real
   ingestion. Completed and stale work stays bounded. Queued prompts preserve
   ongoing tool waits, and ignored command output no longer invents turns.

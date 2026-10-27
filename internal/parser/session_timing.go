@@ -80,6 +80,8 @@ type SessionTimingState struct {
 	Prompt             int64
 	LastClaudeActivity int64
 	ClaudeComplete     bool
+	// Queued prompts share the outstanding requests of their original prompt.
+	ClaudeWaitStart int64
 	// Claude writes cumulative and additive snapshots under one message ID.
 	// Keep the current assistant run's observed calls across checkpoint resumes.
 	ClaudeMessageID    string
@@ -438,13 +440,18 @@ func (s *SessionTimingState) consume(line []byte, agent, path string) error {
 			if queued, ok := extractQueuedCommand(entry.Raw); ok && !queuedCommandMessage(queued).IsSystem {
 				// Queued prompts can arrive while the current tool is still
 				// outstanding. That wait remains active up to this boundary.
+				waiting := false
 				for _, started := range calls {
-					if s.Prompt > 0 && started >= s.Prompt && started <= stamp {
+					if s.ClaudeWaitStart > 0 && started >= s.ClaudeWaitStart && started <= stamp {
 						s.LastClaudeActivity = max(s.LastClaudeActivity, stamp)
+						waiting = true
 						break
 					}
 				}
 				s.closeClaude()
+				if !waiting {
+					s.ClaudeWaitStart = stamp
+				}
 				s.Prompt, s.LastClaudeActivity = stamp, 0
 				s.ClaudeComplete = false
 			}
@@ -497,17 +504,28 @@ func (s *SessionTimingState) consume(line []byte, agent, path string) error {
 			// context, and task notifications as user entries. Match the
 			// provider's classification so these do not split a real turn.
 			text, skip := preprocessClaudeUserText(extractCompactSummary(entry.Raw))
+			if !skip && classifyClaudeSystemMessage(text) == "interrupted" && s.Prompt > 0 && stamp >= s.Prompt && stamp >= s.LastClaudeActivity {
+				// An interruption closes the current turn without creating a
+				// human prompt. Cancelled requests cannot keep later queues busy.
+				s.LastClaudeActivity, s.ClaudeComplete = stamp, true
+				s.ClaudeWaitStart = 0
+				clear(calls)
+				clear(ambiguousCalls)
+			}
 			if skip || strings.TrimSpace(text) == "" || isClaudeSystemMessage(text) {
 				return nil
 			}
 			s.closeClaude()
 			s.Prompt, s.LastClaudeActivity = stamp, 0
+			s.ClaudeWaitStart = stamp
 			s.ClaudeComplete = false
 		}
 		// A tool result proves activity even if the process stops before
 		// another assistant message is written. Keep its known waiting
 		// interval inside this turn without extending it to wall time.
-		if kind == "user" && isResult {
+		// A cancellation acknowledgement after an interruption (or a late
+		// background result after completion) cannot reopen the closed turn.
+		if kind == "user" && isResult && !s.ClaudeComplete {
 			s.LastClaudeActivity = max(s.LastClaudeActivity, stamp)
 			s.ClaudeComplete = false
 		}
@@ -516,6 +534,7 @@ func (s *SessionTimingState) consume(line []byte, agent, path string) error {
 			switch entry.Get("message.stop_reason").Str {
 			case "end_turn", "max_tokens", "stop_sequence":
 				s.ClaudeComplete = true
+				s.ClaudeWaitStart = 0
 			default:
 				s.ClaudeComplete = false
 			}

@@ -310,7 +310,7 @@
 
   let sessionEndMs = $derived.by(() => {
     if (!timing) return sessionStartMs;
-    return sessionStartMs + Math.max(timing.total_duration_ms, 1);
+    return sessionStartMs + Math.max(totalDurationMs, 1);
   });
 
   function turnLeftPct(turn: TurnTiming): number {

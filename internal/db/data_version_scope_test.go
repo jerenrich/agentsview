@@ -234,3 +234,7 @@ func TestAdvanceScopedDataVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestRepeatedQueueTimingUpgradeScopesOnlyClaude(t *testing.T) {
+	assert.Equal(t, []parser.AgentType{parser.AgentClaude}, ScopedDataVersionProviders(154, 155))
+}

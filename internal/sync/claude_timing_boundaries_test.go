@@ -12,7 +12,7 @@ import (
 )
 
 func TestClaudeTimingIngestedQueuedWaitAndIgnoredUsers(t *testing.T) {
-	for _, mode := range []string{"queued full", "queued append", "command noise", "blank user"} {
+	for _, mode := range []string{"queued full", "queued append", "multiple queued full", "multiple queued append", "command noise", "blank user"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			path := filepath.Join(root, "project", "timing.jsonl")
@@ -23,6 +23,10 @@ func TestClaudeTimingIngestedQueuedWaitAndIgnoredUsers(t *testing.T) {
 				`{"timestamp":"2026-04-26T10:00:05Z","type":"attachment","sessionId":"timing","attachment":{"type":"queued_command","prompt":"also check this"}}`,
 				`{"timestamp":"2026-04-26T10:00:10Z","type":"user","sessionId":"timing","message":{"content":[{"type":"tool_result","tool_use_id":"call","content":"done"}]}}`,
 				`{"timestamp":"2026-04-26T10:00:12Z","type":"assistant","sessionId":"timing","message":{"content":"done","stop_reason":"end_turn"}}`,
+			}
+			if strings.HasPrefix(mode, "multiple queued") {
+				second := `{"timestamp":"2026-04-26T10:00:07Z","type":"attachment","sessionId":"timing","attachment":{"type":"queued_command","prompt":"and this"}}`
+				lines = append(lines[:3:3], append([]string{second}, lines[3:]...)...)
 			}
 			active, tool := int64(12000), int64(9000)
 			if mode == "command noise" || mode == "blank user" {
@@ -39,7 +43,7 @@ func TestClaudeTimingIngestedQueuedWaitAndIgnoredUsers(t *testing.T) {
 			}
 			content := strings.Join(lines, "\n") + "\n"
 			initial := content
-			if mode == "queued append" {
+			if strings.HasSuffix(mode, "queued append") {
 				initial = strings.Join(lines[:2], "\n") + "\n"
 			}
 			require.NoError(t, os.WriteFile(path, []byte(initial), 0o600))
@@ -50,7 +54,7 @@ func TestClaudeTimingIngestedQueuedWaitAndIgnoredUsers(t *testing.T) {
 			})
 			t.Cleanup(engine.Close)
 			require.NoError(t, engine.SyncPathsContext(t.Context(), []string{path}))
-			if mode == "queued append" {
+			if strings.HasSuffix(mode, "queued append") {
 				require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 				require.NoError(t, engine.SyncPathsContext(t.Context(), []string{path}))
 			}

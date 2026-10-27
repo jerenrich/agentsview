@@ -110,6 +110,40 @@ describe("SessionVitals", () => {
     vi.unstubAllGlobals();
   });
 
+  it("keeps live timeline marks aligned with the advancing axis", async () => {
+    const startMs = Date.now() - 5000;
+    const timing = timingWithCall();
+    timing.running = true;
+    timing.total_duration_ms = 5000;
+    timing.active_duration_ms = 5000;
+    timing.turns[0]!.started_at = new Date(startMs + 1000).toISOString();
+    timing.turns[0]!.duration_ms = null;
+    timing.activity = [
+      {
+        message_id: 1,
+        ordinal: 0,
+        started_at: new Date(startMs).toISOString(),
+        duration_ms: 5000,
+        tool_ms: 0,
+        unattributed_ms: 5000,
+        running: true,
+      },
+    ];
+    mocks.fetchSessionTiming.mockResolvedValue(timing);
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await tick();
+    await tick();
+    liveTick.now = startMs + 15000;
+    await tick();
+    expect(document.querySelector(".scale-axis")?.textContent).toContain("7.5s");
+    const mark = document.querySelector<HTMLButtonElement>(".lane-mark")!;
+    expect(parseFloat(mark.style.left)).toBeCloseTo((1000 / 15000) * 100);
+    expect(parseFloat(mark.style.width)).toBeCloseTo((14000 / 15000) * 100);
+  });
+
   it.each([
     { duration: null, label: "Not measured" },
     { duration: 0, label: "0ms" },

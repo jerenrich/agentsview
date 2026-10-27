@@ -19,9 +19,9 @@ import (
 
 // Increment when the reducer semantics or encoded continuation state changes.
 // Evidence versioning is independent: invalid cursors can always be rebuilt.
-// Version 4 preserves waiting at queued boundaries, ignores non-prompt noise,
-// and retains explicit Claude completion state.
-const timingCheckpointVersion = 4
+// Version 5 preserves waiting across repeated queued boundaries and closes
+// explicitly interrupted Claude turns.
+const timingCheckpointVersion = 5
 
 // timingCursor is the stored reducer state without its closed evidence. The
 // counts select the closed prefix of the evidence row committed with it: EOF
