@@ -71,6 +71,13 @@ import { m } from "../../i18n/index.js";
 import SessionVitals from "./SessionVitals.svelte";
 import { requestUrl } from "../../test-support/request-url.js";
 
+// Flush transport completion as well as Svelte's rendering work.
+async function flushTiming() {
+  await tick();
+  await Promise.resolve();
+  await tick();
+}
+
 describe("SessionVitals", () => {
   let component: ReturnType<typeof mount> | undefined;
 
@@ -110,6 +117,48 @@ describe("SessionVitals", () => {
     vi.unstubAllGlobals();
   });
 
+  it("bounds the visible active total while refresh requests remain stalled", async () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-04-26T10:00:00Z");
+    vi.setSystemTime(start);
+    try {
+      const timing = timingWithCall();
+      timing.running = true;
+      timing.total_duration_ms = 1000;
+      timing.active_duration_ms = 1000;
+      timing.activity = [
+        {
+          message_id: 1,
+          ordinal: 0,
+          started_at: new Date(start - 1000).toISOString(),
+          duration_ms: 1000,
+          tool_ms: 0,
+          unattributed_ms: 1000,
+          running: true,
+        },
+      ];
+      mocks.fetchSessionTiming
+        .mockReset()
+        .mockResolvedValueOnce(timing)
+        .mockImplementation(() => new Promise(() => {}));
+      component = mount(SessionVitals, {
+        target: document.body,
+        props: { sessionId: "sess-1", session: undefined },
+      });
+      await flushTiming();
+      await vi.advanceTimersByTimeAsync(20 * 60000);
+      await tick();
+      expect(mocks.fetchSessionTiming.mock.calls.length).toBeGreaterThan(2);
+      expect(document.querySelector(".activity-section .v-meta")?.textContent).toBe(
+        "Active · 31.0s",
+      );
+    } finally {
+      sessionTiming.reset();
+      await tick();
+      vi.useRealTimers();
+    }
+  });
+
   it("recovers after a transient quiet-session refresh failure", async () => {
     vi.useFakeTimers();
     try {
@@ -135,8 +184,7 @@ describe("SessionVitals", () => {
         target: document.body,
         props: { sessionId: "sess-1", session: traceSession },
       });
-      await tick();
-      await tick();
+      await flushTiming();
       expect(sessionTiming.timing?.running).toBe(true);
       await vi.advanceTimersByTimeAsync(90000);
       await tick();
@@ -173,8 +221,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
     liveTick.now = startMs + 15000;
     await tick();
     expect(document.querySelector(".scale-axis")?.textContent).toContain("7.5s");
@@ -198,8 +245,7 @@ describe("SessionVitals", () => {
         target: document.body,
         props: { sessionId: "sess-1", session: traceSession },
       });
-      await tick();
-      await tick();
+      await flushTiming();
 
       expect(document.querySelectorAll(".stat-grid .val")[1]?.textContent?.trim()).toBe(label);
       const category = [...document.querySelectorAll<HTMLButtonElement>(".agg-row")].find(
@@ -251,8 +297,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     const row = document.querySelector<HTMLButtonElement>(".activity-row");
     expect(row?.getAttribute("aria-label")).toBe("Turn 1 · 6.0s");
@@ -306,8 +351,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
     expect(document.querySelector(".activity-section .activity-hint")?.textContent).toContain(
       expected,
     );
@@ -329,8 +373,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: traceSession },
     });
-    await tick();
-    await tick();
+    await flushTiming();
     document.querySelector<HTMLButtonElement>(".stat-grid .val-link")!.click();
     expect(scroll).toHaveBeenCalledWith(17);
     scroll.mockRestore();
@@ -347,8 +390,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
     expect(document.querySelector(".activity-totals")?.textContent).toContain(
       "Recorded model · Not measured",
     );
@@ -367,8 +409,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
     expect(document.querySelector(".calls .cd")?.getAttribute("title")).toBe(label);
   });
 
@@ -407,8 +448,7 @@ describe("SessionVitals", () => {
         target: document.body,
         props: { sessionId: "sess-1", session },
       });
-      await tick();
-      await tick();
+      await flushTiming();
 
       const mark = document.querySelector<HTMLElement>(".lane-row .lane-mark")!;
       expect(mark.style.left).toBe("50%");
@@ -440,8 +480,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
     const row = document.querySelector<HTMLButtonElement>(".activity-row")!;
     expect(row.getAttribute("aria-label")).toBe("Turn 1 · 6.0s");
     expect(row.querySelector<HTMLElement>('[data-activity-kind="model"]')!.style.width).toBe("50%");
@@ -479,8 +518,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
     const coverage = document.querySelector("[data-timing-coverage]");
     expect(coverage?.textContent).toContain(label);
     expect(coverage?.textContent).toContain("Model intervals: 3");
@@ -508,8 +546,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
     expect(document.querySelectorAll(".activity-row")).toHaveLength(2);
     expect(document.querySelector(".activity-totals")?.textContent).toContain(
       "Recorded model · 1.0s",
@@ -538,8 +575,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     expect(
       document.querySelector<HTMLElement>('[data-activity-kind="unattributed"]')?.style.width,
@@ -585,8 +621,7 @@ describe("SessionVitals", () => {
         target: document.body,
         props: { sessionId: "sess-1", session: undefined },
       });
-      await tick();
-      await tick();
+      await flushTiming();
 
       liveTick.now = startMs + 61000;
       await tick();
@@ -630,8 +665,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     liveTick.now = startMs + 61000;
     await tick();
@@ -665,8 +699,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     liveTick.now = startMs + 5000;
     await tick();
@@ -690,8 +723,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     const closeButton = document.querySelector<HTMLButtonElement>(
       `button[aria-label="${m.session_vitals_close()}"]`,
@@ -711,8 +743,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: traceSession.id, session: traceSession },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     const rows = document.querySelectorAll(".context-row");
     expect(rows).toHaveLength(2);
@@ -776,8 +807,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: traceSession.id, session: traceSession },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     const worktreeValue = document.querySelector<HTMLElement>(".context-value--path");
     expect(worktreeValue).not.toBeNull();
@@ -813,8 +843,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: traceSession.id, session: traceSession },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     const repositoryCopy = document.querySelector<HTMLButtonElement>(
       `button[aria-label="${m.session_vitals_copy_repository()}"]`,
@@ -986,8 +1015,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     const disclosure = document.querySelector<HTMLButtonElement>('button[aria-expanded="true"]');
     expect(disclosure).not.toBeNull();

@@ -1602,6 +1602,7 @@
   "recall_page_generation_activate_message": "Activer {model} ({fingerprint}) ? Ses entrées automatiques remplaceront le corpus distillé actuellement servi.",
   "recall_page_generation_retire_message": "Retirer {model} ({fingerprint}) ? Ses entrées automatiques resteront archivées.",
   "recall_page_generation_action_error": "Impossible de mettre à jour la génération d’extraction\u202f: {error}",
+  "session_timing_request_timeout": "La requête de durée a expiré.",
   "session_vitals_title": "Analyse",
   "session_vitals_close": "Fermer l'analyse de la session",
   "session_vitals_resize": "Redimensionner le panneau d'analyse de la session",

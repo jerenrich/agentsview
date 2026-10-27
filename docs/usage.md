@@ -1001,7 +1001,11 @@ the fork receives whole-file timing. While a source is available and its last
 activity is less than ten minutes old, the newest unfinished turn keeps running
 until now, including a Claude prompt that has no response yet. This live elapsed
 time is provisional; completed, stale, or source-deleted sessions use recorded
-bounds. Quiet live snapshots are rechecked every thirty seconds.
+bounds. Quiet live snapshots are rechecked every thirty seconds while the
+sessions view is active. The clock pauses during checks; a stalled request times
+out after thirty seconds and can retry without losing the last snapshot.
+Leaving the sessions view stops polling. Returning checks the cached session
+again before its live clock advances.
 
 Individual calls prefer explicit execution endpoints or a closed linked child;
 paired request/result latency supplies a duration when execution is unavailable.

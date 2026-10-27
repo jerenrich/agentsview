@@ -1525,6 +1525,7 @@
   "recall_page_generation_activate_message": "要激活 {model}（{fingerprint}）吗？其自动条目将替换当前提供的机器提炼语料库。",
   "recall_page_generation_retire_message": "要停用 {model}（{fingerprint}）吗？其自动条目将保持归档状态。",
   "recall_page_generation_action_error": "无法更新提取代次：{error}",
+  "session_timing_request_timeout": "时间信息请求超时。",
   "session_vitals_title": "分析",
   "session_vitals_close": "关闭会话分析",
   "session_vitals_resize": "调整会话分析面板大小",

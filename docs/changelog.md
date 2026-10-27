@@ -60,6 +60,10 @@ The latest release is
 
 **Bug fixes**
 
+- Stalled timing checks time out after thirty seconds, keeping the last snapshot
+  and pausing the live clock until fresh data arrives. Leaving the sessions
+  view stops timing polling; returning rechecks the cached session.
+
 - Claude timing filters IDE-wrapped command noise and keeps prompts carried
   alongside tool results in their own activity rows. Live timing retains its
   last snapshot and retries after temporary refresh failures, pausing elapsed

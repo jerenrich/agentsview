@@ -1604,6 +1604,7 @@
   "recall_page_generation_activate_message": "¿Activar {model} ({fingerprint})? Sus entradas automáticas reemplazarán el corpus destilado por máquina que se sirve actualmente.",
   "recall_page_generation_retire_message": "¿Retirar {model} ({fingerprint})? Sus entradas automáticas permanecerán archivadas.",
   "recall_page_generation_action_error": "No se pudo actualizar la generación de extracción: {error}",
+  "session_timing_request_timeout": "La solicitud de tiempos agotó el tiempo de espera.",
   "session_vitals_title": "Análisis",
   "session_vitals_close": "Cerrar el análisis de la sesión",
   "session_vitals_resize": "Redimensionar el panel de análisis de la sesión",

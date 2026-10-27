@@ -344,7 +344,11 @@ retain observed bounds.
 The live client rechecks quiet snapshots every thirty seconds so it stops
 extrapolating when a source goes stale without emitting an update. A failed
 refresh retains the last snapshot and keeps retrying at that cadence, while
-elapsed-time extrapolation pauses until a successful response or SSE update.
+elapsed-time extrapolation pauses during revalidation and until a successful
+response or SSE update. Each timing read has a thirty-second deadline that
+releases its pending request even if the transport ignores cancellation.
+Leaving the sessions route pauses polling and cancels its read while retaining
+the cached snapshot. Returning revalidates that snapshot before the clock advances.
 
 This table is local archive metadata and is not published to SQL mirrors or
 conversation exports. Transient `Session.TimingCapture` also stays out of hosted

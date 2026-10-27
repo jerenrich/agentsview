@@ -1602,6 +1602,7 @@
   "recall_page_generation_activate_message": "Activate {model} ({fingerprint})? Its automatic entries will replace the currently served machine-distilled corpus.",
   "recall_page_generation_retire_message": "Retire {model} ({fingerprint})? Its automatic entries will remain archived.",
   "recall_page_generation_action_error": "Could not update the extraction generation: {error}",
+  "session_timing_request_timeout": "Timing request timed out.",
   "session_vitals_title": "Analysis",
   "session_vitals_close": "Close session analysis",
   "session_vitals_resize": "Resize session analysis panel",

@@ -1525,6 +1525,7 @@
   "recall_page_generation_activate_message": "要啟用 {model}（{fingerprint}）嗎？其自動項目將取代目前提供的機器提煉語料庫。",
   "recall_page_generation_retire_message": "要停用 {model}（{fingerprint}）嗎？其自動項目將維持封存狀態。",
   "recall_page_generation_action_error": "無法更新擷取代次：{error}",
+  "session_timing_request_timeout": "時間資訊請求逾時。",
   "session_vitals_title": "分析",
   "session_vitals_close": "關閉對話分析",
   "session_vitals_resize": "調整對話分析面板大小",

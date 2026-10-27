@@ -1604,6 +1604,7 @@
   "recall_page_generation_activate_message": "{model} ({fingerprint}) aktivləşdirilsin? Onun avtomatik qeydləri hazırda təqdim olunan, kompüter vasitəsilə ümumiləşdirilmiş toplunu əvəz edəcək.",
   "recall_page_generation_retire_message": "{model} ({fingerprint}) istifadədən çıxarılsın? Onun avtomatik qeydləri arxivdə qalacaq.",
   "recall_page_generation_action_error": "Biliklərin çıxarılması üçün yaratmanı yeniləmək mümkün olmadı: {error}",
+  "session_timing_request_timeout": "Vaxt məlumatları üçün sorğunun vaxtı bitdi.",
   "session_vitals_title": "Təhlil",
   "session_vitals_close": "Sessiya təhlilini bağla",
   "session_vitals_resize": "Sessiya təhlili panelinin ölçüsünü dəyişdir",

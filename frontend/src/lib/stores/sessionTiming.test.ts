@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { DbSessionTiming as SessionTiming } from "../api/generated/index.js";
 import { sessionTiming } from "./sessionTiming.svelte.js";
 
@@ -42,7 +42,88 @@ beforeEach(() => {
   timingMocks.fetchSessionTiming.mockReset();
 });
 
+afterEach(() => {
+  sessionTiming.reset();
+  vi.useRealTimers();
+});
+
 describe("SessionTimingStore", () => {
+  it.each(["resolve", "reject"] as const)(
+    "releases a stalled refresh and ignores its late %s after recovery",
+    async (outcome) => {
+      vi.useFakeTimers();
+      const initial = { ...timing("s1", 5000), running: true };
+      const stalled = deferred<SessionTiming>();
+      const signals: AbortSignal[] = [];
+      timingMocks.fetchSessionTiming
+        .mockImplementationOnce((_params, { signal }) => {
+          signals.push(signal);
+          return Promise.resolve(initial);
+        })
+        .mockImplementationOnce((_params, { signal }) => {
+          signals.push(signal);
+          return stalled.promise;
+        });
+      await sessionTiming.load("s1");
+      const pending = sessionTiming.refresh();
+      expect(sessionTiming.refresh()).toBe(pending);
+      await vi.advanceTimersByTimeAsync(30000);
+      await pending;
+      expect(signals[1]?.aborted).toBe(true);
+      expect(sessionTiming.loading).toBe(false);
+      expect(sessionTiming.timing).toEqual(initial);
+      expect(sessionTiming.error).toBe("Timing request timed out.");
+      const completed = timing("s1", 6000);
+      timingMocks.fetchSessionTiming.mockResolvedValueOnce(completed);
+      await sessionTiming.refresh();
+      if (outcome === "resolve") stalled.resolve(initial);
+      else stalled.reject(new Error("obsolete response"));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(sessionTiming.timing).toEqual(completed);
+      expect(sessionTiming.error).toBeNull();
+      expect(sessionTiming.loading).toBe(false);
+    },
+  );
+
+  it("pauses cached reads, settles cancellation, and revalidates on route return", async () => {
+    vi.useFakeTimers();
+    const initial = { ...timing("s1", 5000), running: true };
+    const stalled = deferred<SessionTiming>();
+    let signal: AbortSignal | undefined;
+    timingMocks.fetchSessionTiming
+      .mockResolvedValueOnce(initial)
+      .mockImplementationOnce((_params, options) => {
+        signal = options.signal;
+        return stalled.promise;
+      });
+    await sessionTiming.load("s1");
+    const pending = sessionTiming.refresh();
+    sessionTiming.pause();
+    await pending;
+    expect(signal?.aborted).toBe(true);
+    expect(sessionTiming.pollingPaused).toBe(true);
+    expect(sessionTiming.loading).toBe(false);
+    expect(sessionTiming.timing).toEqual(initial);
+    await sessionTiming.refresh();
+    await sessionTiming.load("s2");
+    sessionTiming.applyEvent(timing("s1", 9000));
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(timingMocks.fetchSessionTiming).toHaveBeenCalledTimes(2);
+    expect(sessionTiming.timing).toEqual(initial);
+    expect(sessionTiming.error).toBeNull();
+    const completed = timing("s1", 6000);
+    timingMocks.fetchSessionTiming.mockResolvedValueOnce(completed);
+    await sessionTiming.resume("s1");
+    expect(sessionTiming.pollingPaused).toBe(false);
+    expect(timingMocks.fetchSessionTiming).toHaveBeenCalledTimes(3);
+    expect(sessionTiming.timing).toEqual(completed);
+    stalled.resolve(initial);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sessionTiming.timing).toEqual(completed);
+  });
+
   it("retains a loaded snapshot and failure state until a refresh recovers", async () => {
     const initial = { ...timing("s1", 5000), running: true };
     timingMocks.fetchSessionTiming
@@ -166,9 +247,10 @@ describe("SessionTimingStore", () => {
 
     void sessionTiming.load("s1");
     await Promise.resolve();
-    sessionTiming.cancelInFlight();
+    sessionTiming.pause();
 
     expect(signals[0]?.aborted).toBe(true);
+    expect(sessionTiming.pollingPaused).toBe(true);
   });
 
   it.each(["resolve", "reject"] as const)(
