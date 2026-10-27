@@ -2988,6 +2988,8 @@ components:
           items:
             $ref: "#/components/schemas/DbCategoryTotal"
           type: array
+        coverage:
+          $ref: "#/components/schemas/DbTimingCoverage"
         idle_duration_ms:
           format: int64
           type: integer
@@ -4002,6 +4004,53 @@ components:
         - ts
         - sessions
         - user_messages
+      type: object
+    DbTimingCoverage:
+      additionalProperties: false
+      properties:
+        caller_wait_calls:
+          format: int64
+          type: integer
+        evidence:
+          type: string
+        execution_calls:
+          format: int64
+          type: integer
+        model_intervals:
+          format: int64
+          type: integer
+        recorded_turns:
+          format: int64
+          type: integer
+        subagent_calls:
+          format: int64
+          type: integer
+        timed_tool_calls:
+          format: int64
+          type: integer
+        tool_calls:
+          format: int64
+          type: integer
+        turn_boundaries:
+          type: string
+        unattributed_ms:
+          format: int64
+          type: integer
+        version:
+          format: int64
+          type: integer
+      required:
+        - evidence
+        - version
+        - turn_boundaries
+        - recorded_turns
+        - model_intervals
+        - tool_calls
+        - timed_tool_calls
+        - execution_calls
+        - caller_wait_calls
+        - subagent_calls
+        - unattributed_ms
       type: object
     DbToolAgentBreakdown:
       additionalProperties: false

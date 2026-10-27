@@ -1776,6 +1776,11 @@ func (db *DB) writeSessionIncremental(ctx context.Context,
 	if err := db.requireWritable(); err != nil {
 		return false, err
 	}
+	var timingErr error
+	update, timingErr = db.prepareIncrementalTiming(ctx, sessionID, update)
+	if timingErr != nil {
+		return false, timingErr
+	}
 	msgs, _ = db.ProjectToolResultImagesWithPolicy(msgs, policy)
 
 	rawMessages := msgs

@@ -90,6 +90,12 @@ func TestCodexExecutionTimingSurvivesSync(t *testing.T) {
 					assert.Equal(t, int64(3000), *turn.Calls[0].DurationMs, "explicit execution still takes precedence for individual calls")
 				}
 			}
+			require.Equal(t, "persisted", timing.Coverage.Evidence)
+			assert.Equal(t, 2, timing.Coverage.TimedToolCalls)
+			require.NoError(t, os.Remove(path))
+			afterDeletion, err := database.GetSessionTiming(t.Context(), "codex:"+codexTimingID)
+			require.NoError(t, err)
+			assert.Equal(t, timing, afterDeletion, "full and incremental ingestion must retain caller waits after source deletion")
 			messages, err := database.GetAllMessages(t.Context(), "codex:"+codexTimingID)
 			require.NoError(t, err)
 			var outputs []string

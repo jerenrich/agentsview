@@ -2957,5 +2957,9 @@
   "call_row_duration_execution": "Qeydə alınmış icra",
   "call_row_duration_caller_wait": "Göndərilmə və təsdiqlər daxil olmaqla sorğudan nəticəyə qədər gözləmə",
   "call_row_duration_subagent": "Əlaqəli alt agentin fəaliyyət müddəti",
-  "session_vitals_activity_archive_hint": "Aktiv müddətlər arxivlənmiş mesajlara əsasən təxmin edilir. Tamamlanma qeydləri olmadıqda boş vaxt da daxil ola bilər."
+  "session_vitals_activity_archive_hint": "Aktiv müddətlər arxivlənmiş mesajlara əsasən təxmin edilir. Tamamlanma qeydləri olmadıqda boş vaxt da daxil ola bilər.",
+  "session_vitals_evidence_persisted": "Fəaliyyət vaxtları arxivləşdirilib",
+  "session_vitals_evidence_source": "Fəaliyyət vaxtları mənbə jurnalındandır",
+  "session_vitals_evidence_unavailable": "Mənbə fəaliyyət vaxtları mövcud deyil",
+  "session_vitals_timing_coverage": "Model intervalları: {model} · Vaxtı ölçülən alət çağırışları: {timed}/{total}"
 }

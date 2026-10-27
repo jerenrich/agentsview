@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 type timingSourceEntry struct {
 	path     string
 	agent    string
+	hash     string
 	limit    int64
 	info     os.FileInfo
 	evidence *parser.SessionTimingEvidence
@@ -60,6 +63,9 @@ func readTimingSource(ctx context.Context, sess *Session) *parser.SessionTimingE
 		return nil
 	}
 	entry := timingSourceEntry{path: path, agent: sess.Agent, limit: limit, info: info}
+	if sess.FileHash != nil {
+		entry.hash = *sess.FileHash
+	}
 	evidence, found := cachedTimingSource(entry)
 	if !found {
 		select {
@@ -81,11 +87,19 @@ func readTimingSource(ctx context.Context, sess *Session) *parser.SessionTimingE
 			if err != nil || !sameTimingSourceInfo(before, info) {
 				return nil
 			}
-			reader := io.LimitReader(file, limit)
+			bounded := &io.LimitedReader{R: file, N: limit}
+			digest := sha256.New()
+			reader := io.TeeReader(bounded, digest)
 			if strings.HasSuffix(path, ".jsonl.zst") {
 				evidence, err = parser.ReadCompressedSessionTiming(ctx, reader, sess.Agent)
 			} else {
 				evidence, err = parser.ReadSessionTiming(ctx, reader, sess.Agent)
+			}
+			if err == nil {
+				_, err = io.Copy(io.Discard, reader)
+			}
+			if err == nil && (bounded.N != 0 || entry.hash != "" && hex.EncodeToString(digest.Sum(nil)) != entry.hash) {
+				return nil
 			}
 			after, statErr := file.Stat()
 			if ctx.Err() != nil || statErr != nil || !sameTimingSourceInfo(before, after) {
@@ -118,7 +132,7 @@ func cachedTimingSource(entry timingSourceEntry) (*parser.SessionTimingEvidence,
 	timingSources.Lock()
 	defer timingSources.Unlock()
 	for _, cached := range timingSources.entries {
-		if cached.path == entry.path && cached.agent == entry.agent && cached.limit == entry.limit && sameTimingSourceInfo(cached.info, entry.info) {
+		if cached.path == entry.path && cached.agent == entry.agent && cached.hash == entry.hash && cached.limit == entry.limit && sameTimingSourceInfo(cached.info, entry.info) {
 			return cached.evidence, true
 		}
 	}

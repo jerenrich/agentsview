@@ -500,6 +500,16 @@
       {#if (timing.idle_duration_ms ?? 0) > 0}
         <p class="activity-hint">{m.session_vitals_idle_excluded({ duration: formatDuration(timing.idle_duration_ms ?? 0) })}</p>
       {/if}
+      {#if timing.coverage}
+        <p class="activity-hint" data-timing-coverage={timing.coverage.evidence}>
+          {timing.coverage.evidence === "persisted" ? m.session_vitals_evidence_persisted() : timing.coverage.evidence === "source" ? m.session_vitals_evidence_source() : m.session_vitals_evidence_unavailable()}
+          · {m.session_vitals_timing_coverage({
+            model: formatNumber(timing.coverage.model_intervals),
+            timed: formatNumber(timing.coverage.timed_tool_calls),
+            total: formatNumber(timing.coverage.tool_calls),
+          })}
+        </p>
+      {/if}
       <div class="activity-totals">
         {#each activityKinds as { kind, label } (kind)}
           <span>

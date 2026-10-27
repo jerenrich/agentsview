@@ -2979,5 +2979,9 @@
   "call_row_duration_execution": "Exécution enregistrée",
   "call_row_duration_caller_wait": "Attente entre la requête et le résultat, envoi et approbations compris",
   "call_row_duration_subagent": "Durée de vie du sous-agent lié",
-  "session_vitals_activity_archive_hint": "Les périodes actives sont estimées à partir des messages archivés. Des traces de fin manquantes peuvent inclure du temps inactif."
+  "session_vitals_activity_archive_hint": "Les périodes actives sont estimées à partir des messages archivés. Des traces de fin manquantes peuvent inclure du temps inactif.",
+  "session_vitals_evidence_persisted": "Chronologie d’activité archivée",
+  "session_vitals_evidence_source": "Chronologie d’activité du journal source",
+  "session_vitals_evidence_unavailable": "Chronologie d’activité source indisponible",
+  "session_vitals_timing_coverage": "Intervalles du modèle : {model} · Appels chronométrés : {timed}/{total}"
 }

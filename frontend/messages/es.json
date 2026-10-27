@@ -2979,5 +2979,9 @@
   "call_row_duration_execution": "Ejecución registrada",
   "call_row_duration_caller_wait": "Espera entre solicitud y resultado, incluido el envío y las aprobaciones",
   "call_row_duration_subagent": "Duración del subagente vinculado",
-  "session_vitals_activity_archive_hint": "Los períodos activos se estiman a partir de mensajes archivados. Si faltan registros de finalización, pueden incluir tiempo de inactividad."
+  "session_vitals_activity_archive_hint": "Los períodos activos se estiman a partir de mensajes archivados. Si faltan registros de finalización, pueden incluir tiempo de inactividad.",
+  "session_vitals_evidence_persisted": "Tiempos de actividad archivados",
+  "session_vitals_evidence_source": "Tiempos de actividad del registro de origen",
+  "session_vitals_evidence_unavailable": "Tiempos de actividad de origen no disponibles",
+  "session_vitals_timing_coverage": "Intervalos del modelo: {model} · Llamadas cronometradas: {timed}/{total}"
 }

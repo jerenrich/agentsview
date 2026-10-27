@@ -160,6 +160,7 @@ export * from "./dbStatsWindow.ts";
 export * from "./dbStripImagesProjectReport.ts";
 export * from "./dbStripImagesReport.ts";
 export * from "./dbTemporalHourlyUTCEntry.ts";
+export * from "./dbTimingCoverage.ts";
 export * from "./dbToolAgentBreakdown.ts";
 export * from "./dbToolCall.ts";
 export * from "./dbToolCategoryCount.ts";

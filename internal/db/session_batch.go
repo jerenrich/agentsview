@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/export"
@@ -159,6 +160,11 @@ func (db *DB) WriteSessionBatchContext(
 		return result, nil
 	}
 
+	writes = slices.Clone(writes)
+	for i := range writes {
+		writes[i].Session = prepareTimingEvidence(ctx, writes[i].Session)
+	}
+
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -252,6 +258,11 @@ func (db *DB) WriteSessionBatchAtomic(ctx context.Context,
 	}
 	if len(writes) == 0 {
 		return result, nil
+	}
+
+	writes = slices.Clone(writes)
+	for i := range writes {
+		writes[i].Session = prepareTimingEvidence(ctx, writes[i].Session)
 	}
 
 	db.mu.Lock()

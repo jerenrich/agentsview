@@ -2936,5 +2936,9 @@
   "call_row_duration_execution": "記録された実行時間",
   "call_row_duration_caller_wait": "送信と承認を含む、リクエストから結果までの待機時間",
   "call_row_duration_subagent": "リンクされたサブエージェントの稼働時間",
-  "session_vitals_activity_archive_hint": "アクティブ期間は保存されたメッセージから推定されます。完了記録がない場合、待機時間が含まれることがあります。"
+  "session_vitals_activity_archive_hint": "アクティブ期間は保存されたメッセージから推定されます。完了記録がない場合、待機時間が含まれることがあります。",
+  "session_vitals_evidence_persisted": "アクティビティの時間を保存済み",
+  "session_vitals_evidence_source": "ソースログのアクティビティ時間",
+  "session_vitals_evidence_unavailable": "ソースのアクティビティ時間なし",
+  "session_vitals_timing_coverage": "モデル区間: {model} · 計測済みツール呼び出し: {timed}/{total}"
 }

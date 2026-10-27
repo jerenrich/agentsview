@@ -2955,5 +2955,9 @@
   "call_row_duration_execution": "Recorded execution",
   "call_row_duration_caller_wait": "Request-to-result waiting, including dispatch and approvals",
   "call_row_duration_subagent": "Linked subagent lifetime",
-  "session_vitals_activity_archive_hint": "Active windows are estimated from archived messages. Missing completion records can include idle time."
+  "session_vitals_activity_archive_hint": "Active windows are estimated from archived messages. Missing completion records can include idle time.",
+  "session_vitals_evidence_persisted": "Activity timing archived",
+  "session_vitals_evidence_source": "Activity timing from source log",
+  "session_vitals_evidence_unavailable": "Source activity timing unavailable",
+  "session_vitals_timing_coverage": "Model intervals: {model} · Timed tool calls: {timed}/{total}"
 }

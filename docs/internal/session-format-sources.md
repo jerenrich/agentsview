@@ -140,6 +140,11 @@ evidence; they do not establish whether a tool helped the task.
 
 ## Claude Code (`claude`)
 
+- **Timing retention (2026-10-27):** Copied-session ingestion and source-deletion
+  checks reverify the fields below. Local SQLite ingestion retains content-free
+  timing evidence and coverage. Source turn boundaries remain conservative;
+  archived evidence does not make missing model duration fields measurable.
+
 - **Activity timing (2026-10-27):** Reverified against local transcript copies
   and timing parser fixtures. Assistant `thinkingDurationMs` supplies a model
   activity interval ending at its timestamp. Matching `tool_use` and
@@ -600,6 +605,14 @@ fixtures retain this field; missing identities remain source-local.
   `internal/parser/cowork_paths.go`, and `internal/parser/cowork_provider.go`.
 
 ## Codex (`codex`)
+
+- **Timing retention (2026-10-27):** The copied-rollout ingestion and deletion
+  regression checks reverify the activity fields below. Local SQLite ingestion
+  retains only timing identifiers and intervals, tied to the imported source
+  hash and size; deleting the rollout does not change the resulting breakdown.
+  Coverage counts describe observed intervals, without assuming all model
+  intervals were logged. Forked/subagent rollouts remain unsupported by this
+  activity reader.
 
 - **Activity timing (2026-10-27):** Reverified against copied local rollouts
   and `session_timing_test.go` fixtures. `task_started` through `task_complete`

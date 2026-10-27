@@ -1658,3 +1658,11 @@ CREATE TABLE IF NOT EXISTS raw_archive_sessions (
     root_id TEXT NOT NULL REFERENCES raw_archive_roots(id), source_key TEXT NOT NULL,
     PRIMARY KEY(device_id,provider,parser_id)
 );
+
+-- Compact local timing metadata survives source retention and archive rebuilds.
+CREATE TABLE IF NOT EXISTS session_timing_evidence (
+ session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+ version INTEGER NOT NULL, agent TEXT NOT NULL, source_id TEXT NOT NULL,
+ file_size INTEGER NOT NULL, file_mtime INTEGER NOT NULL, file_hash TEXT NOT NULL,
+ evidence TEXT NOT NULL
+);

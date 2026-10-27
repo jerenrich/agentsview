@@ -337,6 +337,39 @@ describe("SessionVitals", () => {
     );
   });
 
+  it.each([
+    ["persisted", "Activity timing archived"],
+    ["source", "Activity timing from source log"],
+    ["unavailable", "Source activity timing unavailable"],
+  ])("shows timing coverage for %s evidence", async (evidence, label) => {
+    mocks.fetchSessionTiming.mockResolvedValue({
+      ...mocks.timing,
+      coverage: {
+        evidence,
+        version: 1,
+        turn_boundaries: "recorded",
+        recorded_turns: 2,
+        model_intervals: 3,
+        tool_calls: 5,
+        timed_tool_calls: 2,
+        execution_calls: 1,
+        caller_wait_calls: 1,
+        subagent_calls: 0,
+        unattributed_ms: 1000,
+      },
+    });
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await tick();
+    await tick();
+    const coverage = document.querySelector("[data-timing-coverage]");
+    expect(coverage?.textContent).toContain(label);
+    expect(coverage?.textContent).toContain("Model intervals: 3");
+    expect(coverage?.textContent).toContain("Timed tool calls: 2/5");
+  });
+
   it("renders resumed turns sharing a navigation anchor", async () => {
     const activity = {
       message_id: 1,

@@ -4,6 +4,7 @@
 import type { DbActivityTotals } from "./dbActivityTotals.ts";
 import type { DbCallTiming } from "./dbCallTiming.ts";
 import type { DbCategoryTotal } from "./dbCategoryTotal.ts";
+import type { DbTimingCoverage } from "./dbTimingCoverage.ts";
 import type { DbTurnActivity } from "./dbTurnActivity.ts";
 import type { DbTurnTiming } from "./dbTurnTiming.ts";
 
@@ -12,6 +13,7 @@ export interface DbSessionTiming {
   activity: DbTurnActivity[];
   activity_totals: DbActivityTotals;
   by_category: DbCategoryTotal[];
+  coverage?: DbTimingCoverage;
   idle_duration_ms?: number;
   model_timing_available?: boolean;
   running: boolean;

@@ -15,6 +15,8 @@ import (
 // All durations are in milliseconds. *int64 fields are null when the
 // underlying execution interval is unknown or incomplete.
 type SessionTiming struct {
+	Coverage TimingCoverage `json:"coverage" required:"false"`
+
 	// ModelTimingAvailable means at least one explicit model interval was recorded,
 	// including a zero-duration interval; it does not imply complete coverage.
 	ModelTimingAvailable bool            `json:"model_timing_available,omitzero"`
@@ -119,7 +121,7 @@ func (db *DB) GetSessionTiming(
 	if err != nil {
 		return nil, err
 	}
-	return AssembleTimingContext(ctx, sess, turnRows, callRows, time.Now().UTC())
+	return db.assembleArchivedTiming(ctx, sess, turnRows, callRows)
 }
 
 func (db *DB) queryTurnRows(
@@ -358,6 +360,7 @@ func AssembleTiming(
 			Calls:           turnCalls,
 		})
 	}
+	timingCoverage(out, sess, source, false)
 	return out
 }
 

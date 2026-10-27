@@ -249,6 +249,38 @@ If the original rollout moves outside a filtered push's project scope, the
 curation transfer and removal of the old thread row share a transaction. A
 failed transfer leaves the thread and its pins intact.
 
+### Archived activity timing
+
+SQLite retains content-free timing evidence for local Codex and Claude JSONL
+sources in `session_timing_evidence`. Full and incremental session writes capture
+source IDs, active windows, explicit model intervals, and paired tool waiting
+intervals before taking the writer lock. Evidence commits with session source
+metadata; a failed transaction cannot advance it. Captures use the imported byte
+prefix, validate its SHA-256 when available, and share bounded scans and caches.
+
+Reads prefer evidence whose version, provider, native identity, size, modification
+time, and hash match the imported session. They do not require the source to
+still exist. Unreadable captures preserve existing records; changed source
+bindings cannot reuse them. Orphan, trash, and replacement copies retain evidence.
+Data version 149 reparses local Codex and Claude sources in place to populate it;
+missing sources retain their archived transcripts and report coverage gaps.
+
+The timing API reports evidence provenance, recorded or estimated turn boundaries,
+model interval count, and timed versus total tool calls, with separate execution,
+caller-wait, and linked-subagent counts. Counts describe available evidence, not
+complete logging. Missing model intervals remain unmeasured, and active time not
+assigned to model or tools remains unattributed. Idle gaps between recorded turns
+are excluded. Claude turn endpoints remain conservative prompt-to-final-assistant
+estimates from its source format.
+
+This table is local archive metadata and is not published to SQL mirrors or
+conversation exports. Those reads report source-only or unavailable evidence;
+legacy local reads can also use a readable source before the next ingestion.
+Captures exceeding the source bounds or 32 MiB metadata limit, forked rollouts,
+joined sidechains,
+and unsupported providers retain the archive fallback and its estimated-boundary
+label.
+
 ### Codex incremental import state
 
 Four SQLite-only tables support local Codex imports: `parser_checkpoints` holds

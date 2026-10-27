@@ -333,6 +333,9 @@ func (s *Session) UnmarshalJSON(data []byte) error {
 //
 //nolint:recvcheck // Value encoding and pointer decoding intentionally implement distinct interfaces.
 type Session struct {
+	// TimingCapture is transient write metadata, never part of session JSON or reads.
+	TimingCapture *timingEvidenceRecord `json:"-"`
+
 	// WebURL is a client-derived browser link, never persisted.
 	WebURL                string   `json:"web_url,omitempty"`
 	ID                    string   `json:"id"`
@@ -1677,7 +1680,7 @@ func (db *DB) UpsertSessionPendingContent(ctx context.Context, s Session) (bool,
 func (db *DB) upsertSession(ctx context.Context,
 	s Session, reviveSourceMissing bool,
 ) (sessionUpsertResult, error) {
-	s = db.sessionForStorage(s)
+	s = prepareTimingEvidence(ctx, db.sessionForStorage(s))
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	writer := db.getWriter()
@@ -1808,6 +1811,9 @@ func upsertSessionExec(
 	if err != nil {
 		return sessionUpsertResult{},
 			fmt.Errorf("upserting session %s: %w", s.ID, err)
+	}
+	if err := writeTimingEvidence(ctx, exec, s.ID, s.TimingCapture); err != nil {
+		return sessionUpsertResult{}, err
 	}
 	parentChanged := !nullableStringEqual(previousParent, s.ParentSessionID)
 	if result.inserted || parentChanged || previousRelationship != s.RelationshipType {
@@ -3101,6 +3107,9 @@ type MessageTokenUsageUpdate struct {
 }
 
 type IncrementalSessionUpdate struct {
+	// TimingCapture is prepared before the writer lock and committed with the cursor.
+	TimingCapture *timingEvidenceRecord `json:"-"`
+
 	EndedAt                  *string
 	TerminationStatus        *string
 	MsgCount                 int
@@ -3361,7 +3370,7 @@ func updateSessionIncrementalTx(ctx context.Context,
 			"incremental update session %s: updated %d rows", id, rows,
 		)
 	}
-	return nil
+	return writeTimingEvidence(ctx, tx.ExecContext, id, update.TimingCapture)
 }
 
 // messageRangeTotals is what the rows at or after one ordinal contribute
@@ -3479,12 +3488,17 @@ func replaceSessionIncrementalTx(ctx context.Context,
 			"ranged replacement update session %s: updated %d rows", id, rows,
 		)
 	}
-	return nil
+	return writeTimingEvidence(ctx, tx.ExecContext, id, update.TimingCapture)
 }
 
 func (db *DB) UpdateSessionIncremental(ctx context.Context,
 	id string, update IncrementalSessionUpdate,
 ) error {
+	var err error
+	update, err = db.prepareIncrementalTiming(ctx, id, update)
+	if err != nil {
+		return err
+	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
 

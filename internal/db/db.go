@@ -608,7 +608,7 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // VS Code-format sources in place; source and session identities are unchanged.)
 // (148: retain explicit completed-item execution endpoints in Codex-format
 // sources. Re-parse in place; source and session identities are unchanged.)
-const dataVersion = 148
+const dataVersion = 149
 
 const archiveOnlyVersionBase = 1 << 20
 
@@ -1958,6 +1958,7 @@ var readOnlyRequiredTables = []string{
 	"artifact_checkpoint_stages",
 	"artifact_checkpoint_stage_sessions",
 	"artifact_imported_sessions",
+	"session_timing_evidence",
 }
 
 var (
