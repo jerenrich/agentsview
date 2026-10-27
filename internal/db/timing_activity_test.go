@@ -366,7 +366,11 @@ func TestActivityTiming_VisiblePrompts(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, got.Activity, 1)
 			assert.Equal(t, 0, got.Activity[0].Ordinal)
-			assert.Equal(t, int64(6000), got.Activity[0].UnattributedMs)
+			wantUnknown := int64(6000)
+			if tc.role == "assistant" {
+				wantUnknown = 3000
+			}
+			assert.Equal(t, wantUnknown, got.Activity[0].UnattributedMs)
 			assert.Zero(t, got.ToolDurationMs)
 		})
 	}

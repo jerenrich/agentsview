@@ -55,6 +55,7 @@
   ));
   let toolTimeMeasured = $derived(timing?.tool_call_count === 0 || measuredCategories.size > 0);
   let activityKinds: { kind: ActivityKind; label: string }[] = $derived([
+    { kind: "model", label: m.session_vitals_activity_model() },
     { kind: "tool", label: m.session_vitals_activity_tool() },
     { kind: "unattributed", label: m.session_vitals_activity_unattributed() },
   ]);
@@ -206,10 +207,10 @@
     kind: ActivityKind,
     durationMs: number,
   ): number {
-    if (kind !== "unattributed") return activity[`${kind}_ms`];
+    if (kind !== "unattributed") return activity[`${kind}_ms`] ?? 0;
     return Math.max(
       0,
-      durationMs - activity.tool_ms,
+      durationMs - activity.tool_ms - (activity.model_ms ?? 0),
     );
   }
 
@@ -488,17 +489,21 @@
     <section class="v-section activity-section">
       <header class="v-h">
         <span>{m.session_vitals_activity()}</span>
+        <span class="v-meta">{m.session_vitals_active_duration({ duration: formatDuration(timing.active_duration_ms ?? timing.activity.reduce((sum, row) => sum + row.duration_ms, 0)) })}</span>
       </header>
       <p class="activity-hint">{m.session_vitals_activity_hint()}</p>
+      {#if (timing.idle_duration_ms ?? 0) > 0}
+        <p class="activity-hint">{m.session_vitals_idle_excluded({ duration: formatDuration(timing.idle_duration_ms ?? 0) })}</p>
+      {/if}
       <div class="activity-totals">
         {#each activityKinds as { kind, label } (kind)}
           <span>
             <span class="legend-dot" style="background: {activityToken(kind)};"></span>
-            {label} · {kind === "tool" && !toolTimeMeasured ? m.session_vitals_not_measured() : formatDuration(activityTotal(kind))}
+            {label} · {((kind === "tool" && !toolTimeMeasured) || (kind === "model" && timing.timing_source !== "source" && activityTotal(kind) === 0)) ? m.session_vitals_not_measured() : formatDuration(activityTotal(kind))}
           </span>
         {/each}
       </div>
-      {#each timing.activity as activity, index (activity.message_id)}
+      {#each timing.activity as activity, index (`${activity.started_at}:${index}`)}
         {@const durationMs = activityDuration(activity)}
         <button
           type="button"

@@ -62,7 +62,7 @@ func TestCodexExecutionTimingSurvivesSync(t *testing.T) {
 				require.NoError(t, err)
 				require.Len(t, before.Turns, 2)
 				require.Len(t, before.Turns[0].Calls, 1)
-				assert.Nil(t, before.Turns[0].Calls[0].DurationMs)
+				assert.Equal(t, new(int64(3900)), before.Turns[0].Calls[0].DurationMs, "paired caller wait is available before execution telemetry")
 				engine.Close()
 				file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
 				require.NoError(t, err)
@@ -79,29 +79,35 @@ func TestCodexExecutionTimingSurvivesSync(t *testing.T) {
 			timing, err := database.GetSessionTiming(t.Context(), "codex:"+codexTimingID)
 			require.NoError(t, err)
 			require.Len(t, timing.Turns, 2)
-			if mode == "unknown nested IDs" {
-				assert.Zero(t, timing.ToolDurationMs)
-				assert.Equal(t, int64(10000), timing.ActivityTotals.UnattributedMs)
-			} else {
-				assert.Equal(t, int64(4000), timing.ToolDurationMs, "overlapping executions count once")
-				assert.Equal(t, int64(6000), timing.ActivityTotals.UnattributedMs)
-			}
-			for _, turn := range timing.Turns {
+			assert.Equal(t, int64(4900), timing.ToolDurationMs, "overlapping request/result waits count once")
+			assert.Equal(t, int64(5100), timing.ActivityTotals.UnattributedMs)
+			for i, turn := range timing.Turns {
 				require.Len(t, turn.Calls, 1)
+				require.NotNil(t, turn.Calls[0].DurationMs)
 				if mode == "unknown nested IDs" {
-					assert.Nil(t, turn.Calls[0].DurationMs)
+					assert.Equal(t, []int64{3900, 4800}[i], *turn.Calls[0].DurationMs, "unmatched nested items leave paired latency intact")
 				} else {
-					require.NotNil(t, turn.Calls[0].DurationMs)
-					assert.Equal(t, int64(3000), *turn.Calls[0].DurationMs)
+					assert.Equal(t, int64(3000), *turn.Calls[0].DurationMs, "explicit execution still takes precedence for individual calls")
 				}
 			}
 			messages, err := database.GetAllMessages(t.Context(), "codex:"+codexTimingID)
 			require.NoError(t, err)
 			var outputs []string
+			executionEvents := 0
 			for _, message := range messages {
 				for _, call := range message.ToolCalls {
 					outputs = append(outputs, call.ResultContent)
+					for _, event := range call.ResultEvents {
+						if event.Source == "tool_execution" {
+							executionEvents++
+						}
+					}
 				}
+			}
+			if mode == "unknown nested IDs" {
+				assert.Zero(t, executionEvents, "nested IDs must never create outer execution evidence")
+			} else {
+				assert.Equal(t, 4, executionEvents)
 			}
 			if mode == "blocked output" {
 				assert.Equal(t, []string{"", ""}, outputs)
@@ -158,7 +164,7 @@ func TestCodexExecutionTimingUpgradePreservesIdentity(t *testing.T) {
 	assert.Equal(t, db.CurrentDataVersion(), reopened.GetSessionDataVersion(t.Context(), after.ID))
 	timing, err := reopened.GetSessionTiming(t.Context(), after.ID)
 	require.NoError(t, err)
-	assert.Equal(t, int64(4000), timing.ToolDurationMs)
+	assert.Equal(t, int64(4900), timing.ToolDurationMs)
 	page, err := reopened.ListSessions(t.Context(), db.SessionFilter{Limit: 10})
 	require.NoError(t, err)
 	assert.Len(t, page.Sessions, 1, "upgrade must not create duplicate sessions")

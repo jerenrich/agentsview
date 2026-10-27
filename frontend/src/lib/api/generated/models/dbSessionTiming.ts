@@ -8,13 +8,16 @@ import type { DbTurnActivity } from "./dbTurnActivity.ts";
 import type { DbTurnTiming } from "./dbTurnTiming.ts";
 
 export interface DbSessionTiming {
+  active_duration_ms?: number;
   activity: DbTurnActivity[];
   activity_totals: DbActivityTotals;
   by_category: DbCategoryTotal[];
+  idle_duration_ms?: number;
   running: boolean;
   session_id: string;
   slowest_call: DbCallTiming | null;
   subagent_count: number;
+  timing_source?: string;
   tool_call_count: number;
   tool_duration_ms: number;
   total_duration_ms: number;

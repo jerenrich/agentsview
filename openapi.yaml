@@ -967,6 +967,9 @@ components:
     DbActivityTotals:
       additionalProperties: false
       properties:
+        model_ms:
+          format: int64
+          type: integer
         tool_ms:
           format: int64
           type: integer
@@ -2970,6 +2973,9 @@ components:
     DbSessionTiming:
       additionalProperties: false
       properties:
+        active_duration_ms:
+          format: int64
+          type: integer
         activity:
           items:
             $ref: "#/components/schemas/DbTurnActivity"
@@ -2980,6 +2986,9 @@ components:
           items:
             $ref: "#/components/schemas/DbCategoryTotal"
           type: array
+        idle_duration_ms:
+          format: int64
+          type: integer
         running:
           type: boolean
         session_id:
@@ -2991,6 +3000,8 @@ components:
         subagent_count:
           format: int64
           type: integer
+        timing_source:
+          type: string
         tool_call_count:
           format: int64
           type: integer
@@ -4382,6 +4393,9 @@ components:
           format: int64
           type: integer
         message_id:
+          format: int64
+          type: integer
+        model_ms:
           format: int64
           type: integer
         ordinal:

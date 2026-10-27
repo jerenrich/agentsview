@@ -140,6 +140,14 @@ evidence; they do not establish whether a tool helped the task.
 
 ## Claude Code (`claude`)
 
+- **Activity timing (2026-10-27):** Reverified against local transcript copies
+  and timing parser fixtures. Assistant `thinkingDurationMs` supplies a model
+  activity interval ending at its timestamp. Matching `tool_use` and
+  `tool_result` IDs supply caller waiting intervals. User prompts through the
+  final assistant timestamp conservatively bound active turns. Sidechain
+  records are excluded; absent duration fields remain unattributed.
+
+
 - **Channel messages (2026-10-23):** Reverified against the synthetic Claude
   Code 2.1.305 Telegram transcript in
   [#2400](https://github.com/kenn-io/agentsview/issues/2400), kept in
@@ -590,6 +598,16 @@ fixtures retain this field; missing identities remain source-local.
   `internal/parser/cowork_paths.go`, and `internal/parser/cowork_provider.go`.
 
 ## Codex (`codex`)
+
+- **Activity timing (2026-10-27):** Reverified against copied local rollouts
+  and `session_timing_test.go` fixtures. `task_started` through `task_complete`
+  or `turn_aborted`, paired by `turn_id`, define active windows independent of
+  visible prompts. Completed `Reasoning` and `AgentMessage` items provide
+  `started_at_ms` and `completed_at_ms` model intervals. Matching response-item
+  `call_id` request/output pairs measure caller waiting, not execution. Shared
+  bounded streaming decompression reads Codex `.jsonl.zst` logs. Open turns stop
+  at the snapshot's last observed timestamp. Forked or subagent sources fall
+  back to archive evidence.
 
 - **Execution timing (checked 2026-10-27):** Codex's
   [`ItemCompletedEvent`](https://github.com/openai/codex/blob/2cab11ca40aad193382348a7bda46da2fc47596a/codex-rs/protocol/src/protocol.rs#L2154-L2165)

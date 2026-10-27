@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"go.kenn.io/agentsview/internal/parser"
 	"go.kenn.io/agentsview/internal/stringutil"
 )
 
@@ -14,18 +15,21 @@ import (
 // All durations are in milliseconds. *int64 fields are null when the
 // underlying execution interval is unknown or incomplete.
 type SessionTiming struct {
-	SessionID       string          `json:"session_id"`
-	TotalDurationMs int64           `json:"total_duration_ms"`
-	ToolDurationMs  int64           `json:"tool_duration_ms"`
-	TurnCount       int             `json:"turn_count"`
-	ToolCallCount   int             `json:"tool_call_count"`
-	SubagentCount   int             `json:"subagent_count"`
-	SlowestCall     *CallTiming     `json:"slowest_call"`
-	ByCategory      []CategoryTotal `json:"by_category"`
-	Turns           []TurnTiming    `json:"turns"`
-	Running         bool            `json:"running"`
-	Activity        []TurnActivity  `json:"activity"`
-	ActivityTotals  ActivityTotals  `json:"activity_totals"`
+	ActiveDurationMs int64           `json:"active_duration_ms,omitzero"`
+	IdleDurationMs   int64           `json:"idle_duration_ms,omitzero"`
+	TimingSource     string          `json:"timing_source,omitempty"`
+	SessionID        string          `json:"session_id"`
+	TotalDurationMs  int64           `json:"total_duration_ms"`
+	ToolDurationMs   int64           `json:"tool_duration_ms"`
+	TurnCount        int             `json:"turn_count"`
+	ToolCallCount    int             `json:"tool_call_count"`
+	SubagentCount    int             `json:"subagent_count"`
+	SlowestCall      *CallTiming     `json:"slowest_call"`
+	ByCategory       []CategoryTotal `json:"by_category"`
+	Turns            []TurnTiming    `json:"turns"`
+	Running          bool            `json:"running"`
+	Activity         []TurnActivity  `json:"activity"`
+	ActivityTotals   ActivityTotals  `json:"activity_totals"`
 }
 
 type CategoryTotal struct {
@@ -73,17 +77,19 @@ type TurnRow struct {
 // CallRow is the per-tool_call row returned by the per-call SQL query.
 // All backends pass raw execution evidence to AssembleTiming.
 type CallRow struct {
-	MessageID         int64
-	ToolUseID         string
-	ToolName          string
-	Category          string
-	SkillName         *string
-	SubagentSessionID *string
-	InputJSON         string
-	ExecutionStart    string
-	ExecutionEnd      string
-	SubagentStart     string
-	SubagentEnd       string
+	WaitStart, WaitEnd int64
+	HasWait            bool
+	MessageID          int64
+	ToolUseID          string
+	ToolName           string
+	Category           string
+	SkillName          *string
+	SubagentSessionID  *string
+	InputJSON          string
+	ExecutionStart     string
+	ExecutionEnd       string
+	SubagentStart      string
+	SubagentEnd        string
 }
 
 // GetSessionTiming computes the per-session timing summary. Returns
@@ -92,7 +98,7 @@ type CallRow struct {
 func (db *DB) GetSessionTiming(
 	ctx context.Context, sessionID string,
 ) (*SessionTiming, error) {
-	sess, err := db.GetSession(ctx, sessionID)
+	sess, err := db.GetSessionFull(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +114,7 @@ func (db *DB) GetSessionTiming(
 	if err != nil {
 		return nil, err
 	}
-	return AssembleTiming(sess, turnRows, callRows, time.Now().UTC()), nil
+	return AssembleTimingContext(ctx, sess, turnRows, callRows, time.Now().UTC())
 }
 
 func (db *DB) queryTurnRows(
@@ -263,7 +269,7 @@ func (db *DB) queryCallRows(
 // SQLite and PostgreSQL backends. `now` is captured by the caller so
 // tests can be deterministic if needed.
 func AssembleTiming(
-	sess *Session, turns []TurnRow, calls []CallRow, now time.Time,
+	sess *Session, turns []TurnRow, calls []CallRow, now time.Time, evidence ...*parser.SessionTimingEvidence,
 ) *SessionTiming {
 	running := sess.EndedAt == nil || *sess.EndedAt == ""
 
@@ -287,7 +293,12 @@ func AssembleTiming(
 		)
 	}
 
-	intervals := assembleTurnActivity(out, sess, turns, calls, now)
+	var source *parser.SessionTimingEvidence
+	if len(evidence) > 0 {
+		source = evidence[0]
+	}
+	calls = sourceTimedCalls(turns, calls, source)
+	intervals := assembleTurnActivity(out, sess, turns, calls, now, source)
 	callsByMsg := map[int64][]CallTiming{}
 	for i, r := range calls {
 		c := CallTiming{

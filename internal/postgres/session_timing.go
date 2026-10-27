@@ -21,7 +21,7 @@ import (
 func (s *Store) GetSessionTiming(
 	ctx context.Context, sessionID string,
 ) (*db.SessionTiming, error) {
-	sess, err := s.GetSession(ctx, sessionID)
+	sess, err := s.GetSessionFull(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +37,7 @@ func (s *Store) GetSessionTiming(
 	if err != nil {
 		return nil, err
 	}
-	return db.AssembleTiming(sess, turnRows, callRows, time.Now().UTC()), nil
+	return db.AssembleTimingContext(ctx, sess, turnRows, callRows, time.Now().UTC())
 }
 
 func (s *Store) queryTurnRows(

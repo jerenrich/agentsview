@@ -220,7 +220,7 @@ func (s Sessions) GetSessionTiming(ctx context.Context, sessionID string) (*db.S
 	if err != nil {
 		return nil, err
 	}
-	return db.AssembleTiming(sess, turnRows, callRows, time.Now().UTC()), nil
+	return db.AssembleTimingContext(ctx, sess, turnRows, callRows, time.Now().UTC())
 }
 
 // MessageWindowSQL builds ordinal windows while preserving each driver's revision projection.

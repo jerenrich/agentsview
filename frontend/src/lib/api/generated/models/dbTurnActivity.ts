@@ -5,6 +5,7 @@
 export interface DbTurnActivity {
   duration_ms: number;
   message_id: number;
+  model_ms?: number;
   ordinal: number;
   running: boolean;
   started_at: string;

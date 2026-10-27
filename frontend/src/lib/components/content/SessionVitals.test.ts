@@ -185,7 +185,7 @@ describe("SessionVitals", () => {
     expect(row?.getAttribute("aria-label")).toBe("Turn 1 · 6.0s");
     expect(
       [...row!.querySelectorAll(".activity-track > span")].map((el) => el.getAttribute("title")),
-    ).toEqual(["Tool execution · 2.0s", "Unattributed · 4.0s"]);
+    ).toEqual(["Recorded model · 0ms", "Tool waiting · 2.0s", "Unattributed · 4.0s"]);
     expect(
       parseFloat(row!.querySelector<HTMLElement>('[data-activity-kind="tool"]')!.style.width),
     ).toBeCloseTo(33.3333);
@@ -222,6 +222,73 @@ describe("SessionVitals", () => {
     row!.click();
     expect(scroll).toHaveBeenCalledWith(4);
     scroll.mockRestore();
+  });
+
+  it("renders model, tool and unattributed time without idle gaps", async () => {
+    mocks.fetchSessionTiming.mockResolvedValue({
+      ...mocks.timing,
+      total_duration_ms: 66000,
+      active_duration_ms: 6000,
+      idle_duration_ms: 60000,
+      activity_totals: { model_ms: 3000, tool_ms: 2000, unattributed_ms: 1000 },
+      activity: [
+        {
+          message_id: 10,
+          ordinal: 0,
+          started_at: "2026-07-14T12:00:00Z",
+          duration_ms: 6000,
+          model_ms: 3000,
+          tool_ms: 2000,
+          unattributed_ms: 1000,
+          running: false,
+        },
+      ],
+    });
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await tick();
+    await tick();
+    const row = document.querySelector<HTMLButtonElement>(".activity-row")!;
+    expect(row.getAttribute("aria-label")).toBe("Turn 1 · 6.0s");
+    expect(row.querySelector<HTMLElement>('[data-activity-kind="model"]')!.style.width).toBe("50%");
+    expect(document.querySelector(".activity-totals")?.textContent).toContain(
+      "Recorded model · 3.0s",
+    );
+    expect(document.querySelector(".activity-section")?.textContent).toContain("Active · 6.0s");
+    expect(document.querySelector(".activity-section")?.textContent).toContain(
+      "Idle excluded · 1m 0s",
+    );
+  });
+
+  it("renders resumed turns sharing a navigation anchor", async () => {
+    const activity = {
+      message_id: 1,
+      ordinal: 0,
+      duration_ms: 1000,
+      tool_ms: 0,
+      model_ms: 500,
+      unattributed_ms: 500,
+      running: false,
+    };
+    mocks.fetchSessionTiming.mockResolvedValue({
+      ...mocks.timing,
+      activity: [
+        { ...activity, started_at: "2026-07-14T12:00:00Z" },
+        { ...activity, started_at: "2026-07-14T12:01:00Z" },
+      ],
+    });
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await tick();
+    await tick();
+    expect(document.querySelectorAll(".activity-row")).toHaveLength(2);
+    expect(document.querySelector(".activity-totals")?.textContent).toContain(
+      "Recorded model · 1.0s",
+    );
   });
 
   it("keeps a running unsupported window fully unattributed", async () => {
@@ -290,7 +357,7 @@ describe("SessionVitals", () => {
     expect(row?.getAttribute("aria-label")).toBe("Turn 1 · 5.0s");
     expect(
       [...row!.querySelectorAll(".activity-track > span")].map((el) => el.getAttribute("title")),
-    ).toEqual(["Tool execution · 1.0s", "Unattributed · 4.0s"]);
+    ).toEqual(["Recorded model · 0ms", "Tool waiting · 1.0s", "Unattributed · 4.0s"]);
     expect(row!.querySelector<HTMLElement>('[data-activity-kind="tool"]')!.style.width).toBe("20%");
     expect(
       row!.querySelector<HTMLElement>('[data-activity-kind="unattributed"]')!.style.width,

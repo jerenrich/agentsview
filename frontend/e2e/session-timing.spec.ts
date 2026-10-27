@@ -97,7 +97,7 @@ test.describe("Session Vital Signs", () => {
     const activity = page.locator('.activity-row[data-activity-ordinal="5"]');
     await expect(activity.locator('[data-activity-kind="tool"]')).toHaveAttribute(
       "title",
-      "Tool execution · 20.0s",
+      "Tool waiting · 20.0s",
     );
     await expect(activity.locator('[data-activity-kind="unattributed"]')).toHaveAttribute(
       "title",

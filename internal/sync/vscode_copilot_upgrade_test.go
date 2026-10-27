@@ -36,7 +36,9 @@ func TestVSCodeCopilotSharedToolCallIDResyncPreservesIdentity(t *testing.T) {
 
 	// Model a released archive that stored the hidden placeholder as a
 	// second call under the same tool_use_id.
-	previousVersion := db.CurrentDataVersion() - 1
+	// The shared-ID fix shipped in version 147. A later Codex-only
+	// upgrade must not change which released archive this fixture models.
+	const previousVersion = 146
 	require.NoError(t, database.Update(t.Context(), func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(t.Context(), `INSERT INTO tool_calls
 			(message_id, session_id, tool_name, category, tool_use_id, call_index)
