@@ -1668,7 +1668,9 @@ func (db *DB) UpsertSession(ctx context.Context, s Session) error {
 }
 
 // UpsertSessionPendingContent inserts or updates the session row without
-// clearing source-missing state. Full content writers call
+// clearing source-missing state or publishing uncommitted timing evidence.
+// Full content writers prepare timing before this call and publish it only
+// after the normalized content write succeeds. They call
 // ClearSessionSourceMissing only after every required dependent write lands.
 // The returned bool reports whether the row was source-missing before the
 // upsert, so callers can replace rather than append its retained content.
@@ -1680,7 +1682,12 @@ func (db *DB) UpsertSessionPendingContent(ctx context.Context, s Session) (bool,
 func (db *DB) upsertSession(ctx context.Context,
 	s Session, reviveSourceMissing bool,
 ) (sessionUpsertResult, error) {
-	s = prepareTimingEvidence(ctx, db.sessionForStorage(s))
+	s = db.sessionForStorage(s)
+	if reviveSourceMissing {
+		s = prepareTimingEvidence(ctx, s)
+	} else {
+		s.TimingCapture = nil
+	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	writer := db.getWriter()
@@ -1814,6 +1821,15 @@ func upsertSessionExec(
 	}
 	if err := writeTimingEvidence(ctx, exec, s.ID, s.TimingCapture); err != nil {
 		return sessionUpsertResult{}, err
+	}
+	if !reviveSourceMissing && (s.Agent == "codex" || s.Agent == "claude") {
+		// These full writes commit normalized content and timing separately. Keep
+		// an already-current row retryable even when publication later fails or the
+		// caller is cancelled after its source metadata has advanced.
+		if _, err := exec(ctx, `UPDATE sessions SET data_version=? WHERE id=? AND data_version>=?`,
+			max(CurrentDataVersion()-1, 0), s.ID, CurrentDataVersion()); err != nil {
+			return sessionUpsertResult{}, fmt.Errorf("marking pending timing content stale: %w", err)
+		}
 	}
 	parentChanged := !nullableStringEqual(previousParent, s.ParentSessionID)
 	if result.inserted || parentChanged || previousRelationship != s.RelationshipType {
@@ -5678,6 +5694,23 @@ func (db *DB) ResetAllMtimes(ctx context.Context) error {
 		return fmt.Errorf("beginning mtime reset tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Mtime is part of timing's source binding. Invalidate already-mismatched
+	// records first, so an old zero-mtime record cannot become valid by accident.
+	// Retain its payload for archive preservation, but do not trust its version.
+	if _, err := tx.ExecContext(ctx, `UPDATE session_timing_evidence SET version=0
+ WHERE version=? AND file_mtime<>COALESCE((
+  SELECT file_mtime FROM sessions WHERE id=session_timing_evidence.session_id
+ ),0)`, timingEvidenceVersion); err != nil {
+		return fmt.Errorf("invalidating stale timing mtimes: %w", err)
+	}
+	// Preserve currently valid evidence through the bookkeeping reset, including
+	// sessions whose logs no longer exist. Other binding fields stay unchanged.
+	if _, err := tx.ExecContext(ctx, `UPDATE session_timing_evidence
+ SET file_mtime=0 WHERE version=? AND file_mtime=COALESCE((
+  SELECT file_mtime FROM sessions WHERE id=session_timing_evidence.session_id
+ ),0)`, timingEvidenceVersion); err != nil {
+		return fmt.Errorf("resetting timing evidence mtimes: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx,
 		"UPDATE sessions SET file_mtime = 0",
 	); err != nil {

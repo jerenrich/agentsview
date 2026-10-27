@@ -608,7 +608,11 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // VS Code-format sources in place; source and session identities are unchanged.)
 // (148: retain explicit completed-item execution endpoints in Codex-format
 // sources. Re-parse in place; source and session identities are unchanged.)
-const dataVersion = 150
+// (149: retain local Codex and Claude activity timing evidence.)
+// (150: backfill Codex continuation page timing with canonical page identities.)
+// (151: rebuild Claude activity timing from observed tool results and canonical
+// system-user classification without changing normalized session identities.)
+const dataVersion = 151
 
 const archiveOnlyVersionBase = 1 << 20
 

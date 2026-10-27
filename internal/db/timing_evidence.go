@@ -6,7 +6,6 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"strings"
-	"time"
 
 	"go.kenn.io/agentsview/internal/parser"
 )
@@ -35,6 +34,9 @@ func timingSourceID(s *Session) string {
 // Capture before taking the writer lock. Repeated scans are bounded by the
 // existing source cache and scan semaphore, and only changed writes reach here.
 func prepareTimingEvidence(ctx context.Context, s Session) Session {
+	if s.TimingCapture != nil && s.TimingCapture.Evidence != nil && timingEvidenceMatchesSession(s.TimingCapture, &s) {
+		return s
+	}
 	s.TimingCapture = nil
 	if s.Agent != "codex" && s.Agent != "claude" {
 		return s
@@ -58,6 +60,71 @@ func prepareTimingEvidence(ctx context.Context, s Session) Session {
 	return s
 }
 
+// PrepareSessionTimingEvidence captures source timing before a non-atomic full
+// ingestion starts. The caller publishes this same capture only after its
+// normalized content write succeeds; no second source read is needed.
+func (db *DB) PrepareSessionTimingEvidence(ctx context.Context, s Session) Session {
+	return prepareTimingEvidence(ctx, s)
+}
+
+// PublishSessionTimingEvidence completes a full ingestion's timing publication.
+// Pending session upserts must not publish this evidence before their separately
+// committed content, and a concurrent source replacement must not receive it.
+func (db *DB) PublishSessionTimingEvidence(ctx context.Context, s Session) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.TimingCapture == nil {
+		return nil
+	}
+	if err := db.requireWritable(); err != nil {
+		return err
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	tx, err := db.getWriter().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning timing publication: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	current := Session{ID: s.ID}
+	var deletedAt *string
+	err = tx.QueryRowContext(ctx, `SELECT agent, source_session_id, file_size, file_mtime, file_hash, deleted_at
+ FROM sessions WHERE id=?`, s.ID).Scan(&current.Agent, &current.SourceSessionID, &current.FileSize, &current.FileMtime, &current.FileHash, &deletedAt)
+	if err == sql.ErrNoRows {
+		return ErrSessionChanged
+	}
+	if err != nil {
+		return fmt.Errorf("checking timing publication source: %w", err)
+	}
+	if deletedAt != nil || !timingEvidenceMatchesSession(s.TimingCapture, &current) {
+		return ErrSessionChanged
+	}
+	if err := writeTimingEvidence(ctx, tx.ExecContext, s.ID, s.TimingCapture); err != nil {
+		return fmt.Errorf("publishing timing evidence: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing timing evidence: %w", err)
+	}
+	return nil
+}
+
+func timingEvidenceMatchesSession(r *timingEvidenceRecord, s *Session) bool {
+	currentHash := ""
+	if s.FileHash != nil {
+		currentHash = *s.FileHash
+	}
+	currentSize := int64(0)
+	if s.FileSize != nil {
+		currentSize = *s.FileSize
+	}
+	currentMtime := int64(0)
+	if s.FileMtime != nil {
+		currentMtime = *s.FileMtime
+	}
+	return r.Agent == s.Agent && r.SourceID == timingSourceID(s) && r.Size == currentSize && r.Mtime == currentMtime && r.Hash == currentHash
+}
+
 func writeTimingEvidence(ctx context.Context, exec func(context.Context, string, ...any) (sql.Result, error), id string, r *timingEvidenceRecord) error {
 	if r == nil {
 		return nil
@@ -79,29 +146,25 @@ func writeTimingEvidence(ctx context.Context, exec func(context.Context, string,
 }
 
 func (db *DB) storedTimingEvidence(ctx context.Context, s *Session) (*parser.SessionTimingEvidence, error) {
+	return storedTimingEvidenceWithQuerier(ctx, db.getReader(), s)
+}
+
+type timingEvidenceQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func storedTimingEvidenceWithQuerier(ctx context.Context, q timingEvidenceQuerier, s *Session) (*parser.SessionTimingEvidence, error) {
 	var version int
 	var agent, sourceID, hash, payload string
 	var size, mtime int64
-	err := db.getReader().QueryRowContext(ctx, `SELECT version, agent, source_id, file_size, file_mtime, file_hash, evidence FROM session_timing_evidence WHERE session_id=?`, s.ID).Scan(&version, &agent, &sourceID, &size, &mtime, &hash, &payload)
+	err := q.QueryRowContext(ctx, `SELECT version, agent, source_id, file_size, file_mtime, file_hash, evidence FROM session_timing_evidence WHERE session_id=?`, s.ID).Scan(&version, &agent, &sourceID, &size, &mtime, &hash, &payload)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	currentHash := ""
-	if s.FileHash != nil {
-		currentHash = *s.FileHash
-	}
-	currentSize := int64(0)
-	if s.FileSize != nil {
-		currentSize = *s.FileSize
-	}
-	currentMtime := int64(0)
-	if s.FileMtime != nil {
-		currentMtime = *s.FileMtime
-	}
-	if version != timingEvidenceVersion || agent != s.Agent || sourceID != timingSourceID(s) || size != currentSize || mtime != currentMtime || hash != currentHash {
+	if version != timingEvidenceVersion || !timingEvidenceMatchesSession(&timingEvidenceRecord{Agent: agent, SourceID: sourceID, Size: size, Mtime: mtime, Hash: hash}, s) {
 		return nil, nil
 	}
 	if len(payload) > maxArchivedTimingBytes {
@@ -190,24 +253,4 @@ func timingCoverage(out *SessionTiming, s *Session, e *parser.SessionTimingEvide
 		}
 	}
 	out.Coverage = c
-}
-
-func (db *DB) assembleArchivedTiming(ctx context.Context, s *Session, turns []TurnRow, calls []CallRow) (*SessionTiming, error) {
-	if s.DeletedAt != nil {
-		return nil, nil
-	}
-	e, err := db.storedTimingEvidence(ctx, s)
-	if err != nil {
-		return nil, err
-	}
-	persisted := e != nil
-	if e == nil {
-		e = readTimingSource(ctx, s)
-	} // Legacy archives can still be inspected before their next ingestion.
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	out := AssembleTiming(s, turns, calls, time.Now().UTC(), e)
-	timingCoverage(out, s, e, persisted)
-	return out, nil
 }

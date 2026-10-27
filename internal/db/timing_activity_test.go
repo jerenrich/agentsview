@@ -2,11 +2,13 @@ package db
 
 import (
 	"encoding/json/v2"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/parser"
 )
 
 func TestActivityTiming_MissingPhaseEvidenceStaysUnattributed(t *testing.T) {
@@ -374,4 +376,41 @@ func TestActivityTiming_VisiblePrompts(t *testing.T) {
 			assert.Zero(t, got.ToolDurationMs)
 		})
 	}
+}
+
+func TestActivityTimingFinalAnswerDoesNotKeepRunning(t *testing.T) {
+	for _, finished := range []bool{true, false} {
+		t.Run(fmt.Sprintf("finished=%t", finished), func(t *testing.T) {
+			now := time.Date(2026, 4, 26, 10, 1, 0, 0, time.UTC)
+			got := AssembleTiming(&Session{ID: "open", StartedAt: new("2026-04-26T10:00:00Z")}, []TurnRow{
+				{MessageID: 1, Role: "user", ContentLength: 3, Timestamp: "2026-04-26T10:00:00Z"},
+				{MessageID: 2, Role: "assistant", ContentLength: 4, Timestamp: "2026-04-26T10:00:10Z", HasToolUse: !finished},
+			}, nil, now)
+			require.Len(t, got.Activity, 1)
+			assert.Equal(t, !finished, got.Activity[0].Running)
+			if finished {
+				assert.Equal(t, int64(10000), got.ActiveDurationMs)
+				assert.Equal(t, int64(50000), got.IdleDurationMs)
+			} else {
+				assert.Equal(t, int64(60000), got.ActiveDurationMs)
+				assert.Zero(t, got.IdleDurationMs)
+			}
+		})
+	}
+}
+
+func TestActivityTimingSourceAndSessionBoundsShareOneExtent(t *testing.T) {
+	base := time.Date(2026, 4, 26, 10, 0, 0, 0, time.UTC)
+	stamp := func(n int64) string { return base.Add(time.Duration(n) * time.Second).Format(time.RFC3339Nano) }
+	source := &parser.SessionTimingEvidence{Turns: []parser.TimingInterval{{Start: base.Add(5 * time.Second).UnixMilli(), End: base.Add(10 * time.Second).UnixMilli()}}}
+	got := AssembleTiming(&Session{ID: "bounded", StartedAt: new(stamp(0)), EndedAt: new(stamp(8))}, nil, nil, base.Add(60*time.Second), source)
+	assert.Equal(t, int64(10000), got.TotalDurationMs)
+	assert.Equal(t, int64(5000), got.ActiveDurationMs)
+	assert.Equal(t, int64(5000), got.IdleDurationMs)
+	source.Turns = []parser.TimingInterval{{Start: base.UnixMilli(), End: base.Add(-time.Second).UnixMilli()}}
+	require.NotPanics(t, func() {
+		got = AssembleTiming(&Session{ID: "invalid", StartedAt: new(stamp(0)), EndedAt: new(stamp(8))}, []TurnRow{{Role: "user", ContentLength: 3, Timestamp: stamp(0)}}, nil, base, source)
+	})
+	assert.Empty(t, got.TimingSource, "invalid lifecycle windows do not claim recorded boundaries")
+	assert.Equal(t, "estimated", got.Coverage.TurnBoundaries)
 }

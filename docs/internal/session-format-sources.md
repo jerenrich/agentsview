@@ -149,8 +149,11 @@ evidence; they do not establish whether a tool helped the task.
   and timing parser fixtures. Assistant `thinkingDurationMs` supplies a model
   activity interval ending at its timestamp. Matching `tool_use` and
   `tool_result` IDs supply caller waiting intervals. User prompts through the
-  final assistant timestamp conservatively bound active turns. Sidechain
-  records and hidden `isMeta` entries are excluded using the provider parser
+  last observed assistant or tool-result timestamp conservatively bound active
+  turns, including EOF before another assistant response. Canonical system-user
+  classification excludes interruption markers, IDE context, and notifications
+  from prompt boundaries. Out-of-order activity cannot shorten a known window.
+  Sidechain records and hidden `isMeta` entries are excluded using the provider parser
   rule; channel-origin user messages remain prompts. Absent duration fields
   remain unattributed. Reverified against hidden-metadata and channel fixtures.
 

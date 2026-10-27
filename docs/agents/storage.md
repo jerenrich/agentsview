@@ -255,7 +255,12 @@ SQLite retains content-free timing evidence for local Codex and Claude JSONL
 sources in `session_timing_evidence`. Full and incremental session writes capture
 source IDs, active windows, explicit model intervals, and paired tool waiting
 intervals before taking the writer lock. Evidence commits with session source
-metadata; a failed transaction cannot advance it. Captures use the imported byte
+metadata for atomic bulk and incremental writes. Normal full imports capture
+evidence before their pending metadata write and publish it only after normalized
+content commits, verifying the full source binding again under the writer lock.
+Pending supported-provider rows stay stale until all required writes succeed,
+so content or publication failures retry without claiming persisted timing.
+Captures use the imported byte
 prefix, validate its SHA-256 when available, and share bounded scans and caches.
 
 Reads prefer evidence whose version, provider, native identity, size, modification
@@ -265,23 +270,31 @@ bindings cannot reuse them. Orphan, trash, and replacement copies retain evidenc
 Data version 149 reparses local Codex and Claude sources in place to populate it;
 missing sources retain their archived transcripts and report coverage gaps.
 Data version 150 backfills Codex continuation pages using the provider’s exact
-filename/header identity rules, including older page headers.
+filename/header identity rules, including older page headers. Data version 151
+backfills Claude observed tool-result endpoints and system-user classification.
+Forced mtime resets preserve currently valid evidence and invalidate mismatched
+records before rebinding; source deletion cannot turn a reset into timing loss.
+Timing reads load session bounds, messages, calls, and saved evidence from one
+SQLite snapshot, releasing it before optional source-file I/O.
 
 The timing API reports evidence provenance, recorded or estimated turn boundaries,
 model interval count, and timed versus total tool calls, with separate execution,
 caller-wait, and linked-subagent counts. Counts describe available evidence, not
 complete logging. Missing model intervals remain unmeasured, and active time not
 assigned to model or tools remains unattributed. Idle gaps between recorded turns
-are excluded. Claude turn endpoints remain conservative prompt-to-final-assistant
-estimates from its source format.
+are excluded. Claude turn endpoints conservatively follow the last observed
+assistant or tool result in its source format. Provider-classified system entries never split those turns. The total
+timeline preserves the combined extent of session metadata and recorded tasks.
 
 This table is local archive metadata and is not published to SQL mirrors or
-conversation exports. Those reads report source-only or unavailable evidence;
+conversation exports. Transient `Session.TimingCapture` also stays out of hosted
+raw content revisions and gob payloads, preserving immutable content IDs.
+Those reads report source-only or unavailable evidence;
 legacy local reads can also use a readable source before the next ingestion.
-Captures exceeding the source bounds or 32 MiB metadata limit, forked rollouts,
-joined sidechains,
-and unsupported providers retain the archive fallback and its estimated-boundary
-label.
+The source cache also caps estimated retained memory at 32 MiB, counting strings
+and slice capacities. Captures exceeding source bounds or the 32 MiB metadata
+limit, forked rollouts, joined sidechains, and unsupported providers retain the
+archive fallback and its estimated-boundary label.
 
 ### Codex incremental import state
 

@@ -2,6 +2,7 @@ package parser
 
 import (
 	"context"
+	"encoding/json/v2"
 	"runtime"
 	"strings"
 	"testing"
@@ -52,6 +53,83 @@ func TestReadSessionTimingClaude(t *testing.T) {
 	assert.Equal(t, int64(1000), evidence.Model[0].End-evidence.Model[0].Start)
 	require.Len(t, evidence.Calls, 1)
 	assert.Equal(t, int64(1000), evidence.Calls[0].End-evidence.Calls[0].Start)
+}
+
+func TestReadSessionTimingClaudeToolResultBoundsInterruptedTurn(t *testing.T) {
+	prefix := []string{
+		`{"timestamp":"2026-04-26T10:00:00Z","type":"user","sessionId":"timing","message":{"content":"go"}}`,
+		`{"timestamp":"2026-04-26T10:00:02Z","type":"assistant","sessionId":"timing","message":{"content":[{"type":"tool_use","id":"call","name":"Bash"}]}}`,
+	}
+	result := `{"timestamp":"2026-04-26T10:00:30Z","type":"user","sessionId":"timing","message":{"content":[{"type":"tool_result","tool_use_id":"call","content":"done"}]}}`
+	next := `{"timestamp":"2026-04-26T11:00:00Z","type":"user","sessionId":"timing","message":{"content":"next"}}`
+	earlierAssistant := `{"timestamp":"2026-04-26T10:00:20Z","type":"assistant","sessionId":"timing","message":{"content":"working"}}`
+	for _, tc := range []struct {
+		name      string
+		tail      []string
+		duration  int64
+		callCount int
+	}{
+		{"completed at EOF", []string{result}, 30000, 1},
+		{"completed before next prompt", []string{result, next}, 30000, 1},
+		{"pending at EOF", nil, 2000, 0},
+		{"pending before next prompt", []string{next}, 2000, 0},
+		{"later assistant has earlier timestamp", []string{result, earlierAssistant}, 30000, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := append(append([]string(nil), prefix...), tc.tail...)
+			evidence, err := ReadSessionTiming(t.Context(), strings.NewReader(strings.Join(lines, "\n")), "claude")
+			require.NoError(t, err)
+			require.Len(t, evidence.Turns, 1)
+			assert.Equal(t, tc.duration, evidence.Turns[0].End-evidence.Turns[0].Start)
+			require.Len(t, evidence.Calls, tc.callCount)
+			if tc.callCount > 0 {
+				assert.Equal(t, int64(28000), evidence.Calls[0].End-evidence.Calls[0].Start)
+				assert.LessOrEqual(t, evidence.Calls[0].End, evidence.Turns[0].End, "observed waiting must fit inside the active turn")
+			}
+		})
+	}
+}
+
+func TestReadSessionTimingClaudeSystemUserRecordsDoNotSplitTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		text     string
+		isPrompt bool
+	}{
+		{"interruption", "[Request interrupted by user]", false},
+		{"IDE context", "<ide_opened_file>The user opened README.md.</ide_opened_file>", false},
+		{"IDE selection", "<ide_selection>package main</ide_selection>", false},
+		{"task notification", "<task-notification>done</task-notification>", false},
+		{"continuation", "This session is being continued from a previous conversation.", false},
+		{"resume", "<local-command-caveat>output</local-command-caveat>", false},
+		{"IDE with real prompt", "<ide_opened_file>README.md</ide_opened_file>\nExplain this file", true},
+		{"system reminder with real prompt", "<system-reminder>context</system-reminder>\nDo this next", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, array := range []bool{false, true} {
+				var content any = tc.text
+				if array {
+					content = []map[string]string{{"type": "text", "text": tc.text}}
+				}
+				encoded, err := json.Marshal(content)
+				require.NoError(t, err)
+				source := strings.Join([]string{
+					`{"timestamp":"2026-04-26T10:00:00Z","type":"user","sessionId":"timing","message":{"content":"go"}}`,
+					`{"timestamp":"2026-04-26T10:00:02Z","type":"assistant","sessionId":"timing","message":{"content":"working"}}`,
+					`{"timestamp":"2026-04-26T10:00:03Z","type":"user","sessionId":"timing","message":{"content":` + string(encoded) + `}}`,
+					`{"timestamp":"2026-04-26T10:00:05Z","type":"assistant","sessionId":"timing","message":{"content":"done"}}`,
+				}, "\n")
+				evidence, err := ReadSessionTiming(t.Context(), strings.NewReader(source), "claude")
+				require.NoError(t, err)
+				if tc.isPrompt {
+					require.Len(t, evidence.Turns, 2, "array=%t", array)
+				} else {
+					require.Len(t, evidence.Turns, 1, "array=%t", array)
+					assert.Equal(t, int64(5000), evidence.Turns[0].End-evidence.Turns[0].Start)
+				}
+			}
+		})
+	}
 }
 
 func TestReadSessionTimingRejectsReplayAndCancellation(t *testing.T) {

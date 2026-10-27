@@ -266,3 +266,76 @@ func TestArchivedTimingContinuationPage(t *testing.T) {
 		})
 	}
 }
+
+func TestArchivedTimingSurvivesForcedResyncWithoutSource(t *testing.T) {
+	d := testDB(t)
+	s := archivedTimingFixture(t, d)
+	require.NoError(t, d.UpsertSession(t.Context(), s))
+	before, err := d.GetSessionTiming(t.Context(), s.ID)
+	require.NoError(t, err)
+	require.Equal(t, "persisted", before.Coverage.Evidence)
+	require.NoError(t, os.Remove(*s.FilePath))
+	require.NoError(t, d.ResetAllMtimes(t.Context()))
+	after, err := d.GetSessionTiming(t.Context(), s.ID)
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
+	// Resetting sync bookkeeping cannot make evidence for different bytes valid.
+	_, err = d.getWriter().Exec(t.Context(), "UPDATE sessions SET file_hash=? WHERE id=?", strings.Repeat("0", 64), s.ID)
+	require.NoError(t, err)
+	require.NoError(t, d.ResetAllMtimes(t.Context()))
+	stale, err := d.GetSessionTiming(t.Context(), s.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "unavailable", stale.Coverage.Evidence)
+}
+
+func TestArchivedTimingReadsOneSnapshotDuringReplacement(t *testing.T) {
+	d := testDB(t)
+	s := archivedTimingFixture(t, d)
+	require.NoError(t, d.UpsertSession(t.Context(), s))
+	require.NoError(t, os.Remove(*s.FilePath))
+	before, err := d.GetSessionTiming(t.Context(), s.ID)
+	require.NoError(t, err)
+	changed := s
+	changed.FileSize = new(*s.FileSize + 1)
+	changed.FileHash = new(strings.Repeat("0", 64))
+	changed.EndedAt = new("2026-04-26T10:00:30Z")
+	snapshot, err := d.getSessionTiming(t.Context(), s.ID, func() {
+		_, err := d.WriteSessionBatchAtomic(t.Context(), []SessionBatchWrite{{Session: changed, ReplaceMessages: true, SkipSignalUpdates: true, Messages: []Message{
+			{SessionID: s.ID, Ordinal: 0, Role: "user", Content: "changed", ContentLength: 7, Timestamp: *s.StartedAt},
+			{SessionID: s.ID, Ordinal: 1, Role: "assistant", Content: "finished", ContentLength: 8, Timestamp: *changed.EndedAt},
+		}}})
+		require.NoError(t, err)
+	})
+	require.NoError(t, err)
+	assert.Equal(t, before, snapshot)
+	latest, err := d.GetSessionTiming(t.Context(), s.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "unavailable", latest.Coverage.Evidence)
+	assert.Zero(t, latest.ToolCallCount)
+	assert.Equal(t, int64(30000), latest.ActiveDurationMs)
+}
+
+func TestResetAllMtimesDoesNotPromoteStaleZeroTiming(t *testing.T) {
+	d := testDB(t)
+	s := archivedTimingFixture(t, d)
+	require.NoError(t, d.UpsertSession(t.Context(), s))
+	require.NoError(t, os.Remove(*s.FilePath))
+	// A legacy hashless source changed after an earlier reset. Its old zero
+	// timestamp must remain stale even when all source mtimes are reset again.
+	_, err := d.getWriter().Exec(t.Context(), "UPDATE session_timing_evidence SET file_mtime=0,file_hash='' WHERE session_id=?", s.ID)
+	require.NoError(t, err)
+	_, err = d.getWriter().Exec(t.Context(), "UPDATE sessions SET file_hash=NULL WHERE id=?", s.ID)
+	require.NoError(t, err)
+	before, err := d.GetSessionTiming(t.Context(), s.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "unavailable", before.Coverage.Evidence)
+	require.NoError(t, d.ResetAllMtimes(t.Context()))
+	after, err := d.GetSessionTiming(t.Context(), s.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "unavailable", after.Coverage.Evidence)
+	var version int
+	var body string
+	require.NoError(t, d.getReader().QueryRowContext(t.Context(), "SELECT version,evidence FROM session_timing_evidence WHERE session_id=?", s.ID).Scan(&version, &body))
+	assert.Zero(t, version)
+	assert.NotEmpty(t, body, "invalidating a binding must retain archived metadata")
+}

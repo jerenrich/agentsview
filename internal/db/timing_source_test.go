@@ -267,6 +267,56 @@ func TestTimingSourceNegativeCacheAndSnapshotReplacement(t *testing.T) {
 	assert.Equal(t, 1, count, "replace old snapshots instead of consuming another cache slot")
 }
 
+func TestTimingSourceCacheBoundsRetainedIdentifierBytes(t *testing.T) {
+	for _, field := range []string{"source ID", "call ID"} {
+		t.Run(field, func(t *testing.T) {
+			timingSources.Lock()
+			previous := timingSources.entries
+			timingSources.entries = nil
+			timingSources.Unlock()
+			t.Cleanup(func() {
+				timingSources.Lock()
+				timingSources.entries = previous
+				timingSources.Unlock()
+			})
+			large := strings.Repeat("x", maxTimingSourceCacheBytes/2+1024)
+			paths := []string{"first", "second", "third"}
+			for _, path := range paths {
+				source := &parser.SessionTimingEvidence{SourceID: "source"}
+				if field == "source ID" {
+					source.SourceID = strings.Clone(large)
+				} else {
+					source.Calls = []parser.TimingCall{{ID: strings.Clone(large)}}
+				}
+				cacheTimingSource(timingSourceEntry{path: path, agent: "codex", evidence: source})
+			}
+			timingSources.Lock()
+			defer timingSources.Unlock()
+			require.Len(t, timingSources.entries, 1, "three tiny event counts can still exceed the retained-byte budget")
+			assert.Equal(t, "third", timingSources.entries[0].path, "evict the oldest snapshots")
+		})
+	}
+}
+
+func TestTimingSourceCacheRejectsOversizeEntry(t *testing.T) {
+	timingSources.Lock()
+	previous := timingSources.entries
+	timingSources.entries = nil
+	timingSources.Unlock()
+	t.Cleanup(func() {
+		timingSources.Lock()
+		timingSources.entries = previous
+		timingSources.Unlock()
+	})
+	cacheTimingSource(timingSourceEntry{path: "same", agent: "codex", evidence: &parser.SessionTimingEvidence{SourceID: "before"}})
+	cacheTimingSource(timingSourceEntry{path: "other", agent: "codex", evidence: &parser.SessionTimingEvidence{SourceID: "retained"}})
+	cacheTimingSource(timingSourceEntry{path: "same", agent: "codex", evidence: &parser.SessionTimingEvidence{SourceID: strings.Repeat("x", maxTimingSourceCacheBytes+1)}})
+	timingSources.Lock()
+	defer timingSources.Unlock()
+	require.Len(t, timingSources.entries, 1, "do not retain an oversize replacement or its superseded snapshot")
+	assert.Equal(t, "other", timingSources.entries[0].path)
+}
+
 func TestTimingSourceCancellationWhileReadersBusy(t *testing.T) {
 	for i := 0; i < cap(timingSourceReads); i++ {
 		timingSourceReads <- struct{}{}

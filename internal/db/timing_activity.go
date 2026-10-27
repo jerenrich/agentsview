@@ -118,9 +118,6 @@ func assembleTurnActivity(
 
 	var sourceTurns, model []activityInterval
 	if source != nil {
-		if len(source.Turns) > 0 {
-			out.TimingSource = "source"
-		}
 		out.ModelTimingAvailable = len(source.Model) > 0
 		for _, interval := range source.Turns {
 			sourceTurns = append(sourceTurns, activityInterval{interval.Start, interval.End})
@@ -131,8 +128,10 @@ func assembleTurnActivity(
 		sort.Slice(sourceTurns, func(i, j int) bool { return sourceTurns[i].start < sourceTurns[j].start })
 	}
 	var windows []activityInterval
+	sourceTurns = activityMergeIntervals(sourceTurns, false)
 	if len(sourceTurns) > 0 {
-		windows = activityMergeIntervals(sourceTurns, false)
+		out.TimingSource = "source"
+		windows = sourceTurns
 		out.Activity = nil
 		type anchor struct {
 			stamp int64
@@ -166,8 +165,19 @@ func assembleTurnActivity(
 			})
 			out.ActiveDurationMs += window.end - window.start
 		}
-		lower, hasLower = windows[0].start, true
-		upper, hasUpper = windows[len(windows)-1].end, true
+		// Session metadata can precede the first task, and lifecycle completion
+		// can follow the final visible message. Preserve their combined extent.
+		if hasLower {
+			lower = min(lower, windows[0].start)
+		} else {
+			lower = windows[0].start
+		}
+		if hasUpper {
+			upper = max(upper, windows[len(windows)-1].end)
+		} else {
+			upper = windows[len(windows)-1].end
+		}
+		hasLower, hasUpper = true, true
 		out.TotalDurationMs = max(out.TotalDurationMs, upper-lower)
 	} else {
 		type assistantEnd struct {
@@ -194,13 +204,15 @@ func assembleTurnActivity(
 			}
 			// A final assistant answer is the best archive-only endpoint. A tool
 			// request alone does not prove that a turn has finished.
+			closedByAnswer := false
 			index := sort.Search(len(assistantEnds), func(j int) bool { return assistantEnds[j].stamp > end }) - 1
 			if index >= 0 && assistantEnds[index].stamp >= start && !assistantEnds[index].hasToolUse {
 				end = assistantEnds[index].stamp
+				closedByAnswer = true
 			}
 			end = max(start, end)
 			out.Activity[i].DurationMs = end - start
-			out.Activity[i].Running = out.Running && i == len(out.Activity)-1
+			out.Activity[i].Running = out.Running && i == len(out.Activity)-1 && !closedByAnswer
 			windows = append(windows, activityInterval{start, end})
 			out.ActiveDurationMs += end - start
 		}

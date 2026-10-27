@@ -18487,6 +18487,7 @@ func (e *Engine) writeBatchWithOutcomeContext(
 		// dependent write succeeds below. For incremental updates
 		// (writeIncremental), messages are written first since the session
 		// already exists.
+		s = e.db.PrepareSessionTimingEvidence(ctx, s)
 		revivingSourceMissing, err := e.upsertSessionPendingContentForWrite(ctx, pw, s)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -18576,6 +18577,15 @@ func (e *Engine) writeBatchWithOutcomeContext(
 			continue
 		}
 
+		if err := e.db.PublishSessionTimingEvidence(ctx, s); err != nil {
+			if ctx.Err() != nil {
+				return outcome
+			}
+			log.Printf("publish timing for session %s: %v", s.ID, err)
+			e.markStaleFailedMemberWrite(ctx, pw)
+			outcome.failedSessions++
+			continue
+		}
 		if ctx.Err() != nil {
 			return outcome
 		}
@@ -19216,6 +19226,7 @@ func (e *Engine) writeBatchBulkWithOutcomeContext(
 			// The bulk batch would normally create the session row, so
 			// mirror the standard write path's session upsert and
 			// post-write sequence here.
+			s = e.db.PrepareSessionTimingEvidence(ctx, s)
 			_, err := e.upsertSessionPendingContentForWrite(ctx, pw, s)
 			if err != nil {
 				if isIntentionalSessionSkip(err) {
@@ -19240,6 +19251,15 @@ func (e *Engine) writeBatchBulkWithOutcomeContext(
 				log.Printf(
 					"write staged session %s: %v", s.ID, err,
 				)
+				e.markStaleFailedMemberWrite(ctx, pw)
+				outcome.failedSessions++
+				continue
+			}
+			if err := e.db.PublishSessionTimingEvidence(ctx, s); err != nil {
+				if ctx.Err() != nil {
+					return outcome
+				}
+				log.Printf("publish timing for staged session %s: %v", s.ID, err)
 				e.markStaleFailedMemberWrite(ctx, pw)
 				outcome.failedSessions++
 				continue
@@ -20281,6 +20301,7 @@ func (e *Engine) writeSessionFullWithResolver(
 		return errSessionPreserved
 	}
 	s, msgs := prepared.Session, prepared.Messages
+	s = e.db.PrepareSessionTimingEvidence(ctx, s)
 	_, err = e.upsertSessionPendingContentForWrite(ctx, pw, s)
 	if err != nil {
 		if isIntentionalSessionSkip(err) {
@@ -20349,6 +20370,10 @@ func (e *Engine) writeSessionFullWithResolver(
 			)
 			return err
 		}
+	}
+	if err := e.db.PublishSessionTimingEvidence(ctx, s); err != nil {
+		log.Printf("publish timing for session %s: %v", s.ID, err)
+		return err
 	}
 	if err := e.db.ReplaceSessionUsageEvents(ctx,
 		s.ID, prepared.UsageEvents,

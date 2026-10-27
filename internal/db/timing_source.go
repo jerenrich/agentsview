@@ -43,6 +43,7 @@ func AssembleTimingContext(ctx context.Context, sess *Session, turns []TurnRow, 
 }
 
 const maxTimingSourceBytes = 256 << 20
+const maxTimingSourceCacheBytes = 32 << 20
 
 // Bound concurrent decompression and JSON scans, including requests for different
 // sessions. A cancelled request waiting for capacity does no filesystem work.
@@ -146,24 +147,52 @@ func timingSourceEvents(source *parser.SessionTimingEvidence) int {
 	return len(source.Turns) + len(source.Model) + len(source.Calls)
 }
 
+// Include retained string data and slice capacity, not just event cardinality:
+// a single oversized source or call ID can otherwise exhaust the cache budget.
+// The fixed allowance covers entry, evidence, file-info, and slice headers;
+// 16/32 are the interval/call element sizes on the largest supported word size.
+func timingSourceRetainedBytes(entry timingSourceEntry) int64 {
+	bytes := int64(512 + len(entry.path) + len(entry.agent) + len(entry.hash))
+	if source := entry.evidence; source != nil {
+		bytes += int64(len(source.SourceID))
+		bytes += int64(cap(source.Turns)+cap(source.Model)) * 16
+		bytes += int64(cap(source.Calls)) * 32
+		for _, call := range source.Calls {
+			bytes += int64(len(call.ID))
+		}
+	}
+	return bytes
+}
+
 func cacheTimingSource(entry timingSourceEntry) {
 	timingSources.Lock()
 	defer timingSources.Unlock()
 	// Replace older snapshots of this source, rather than retaining a copy on
-	// every append or racing miss. FIFO remains bounded by entries and events.
+	// every append or racing miss. FIFO remains bounded by entries, events,
+	// and estimated retained bytes, including potentially large identifiers.
 	entries := make([]timingSourceEntry, 0, 16)
-	events := timingSourceEvents(entry.evidence)
+	events, bytes, incoming := 0, int64(0), 0
+	entryBytes := timingSourceRetainedBytes(entry)
+	cacheable := entryBytes <= maxTimingSourceCacheBytes
+	if cacheable {
+		events, bytes, incoming = timingSourceEvents(entry.evidence), entryBytes, 1
+	}
 	for _, cached := range timingSources.entries {
 		if cached.path == entry.path && cached.agent == entry.agent {
 			continue
 		}
 		entries = append(entries, cached)
 		events += timingSourceEvents(cached.evidence)
+		bytes += timingSourceRetainedBytes(cached)
 	}
-	for len(entries) > 0 && (len(entries) >= 16 || events > 200000) {
+	for len(entries) > 0 && (len(entries)+incoming > 16 || events > 200000 || bytes > maxTimingSourceCacheBytes) {
 		events -= timingSourceEvents(entries[0].evidence)
+		bytes -= timingSourceRetainedBytes(entries[0])
 		entries[0] = timingSourceEntry{}
 		entries = entries[1:]
 	}
-	timingSources.entries = append(entries, entry)
+	if cacheable {
+		entries = append(entries, entry)
+	}
+	timingSources.entries = entries
 }

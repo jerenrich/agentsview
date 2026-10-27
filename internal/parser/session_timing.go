@@ -46,8 +46,8 @@ func ReadCompressedSessionTiming(ctx context.Context, source io.Reader, agent st
 }
 
 // ReadSessionTiming reads a bounded, already-imported source snapshot. Codex
-// lifecycle events close turns; Claude's final assistant timestamp provides a
-// conservative endpoint. Forked/replayed sources are left to archive timing
+// lifecycle events close turns; Claude's last assistant or tool-result timestamp
+// provides a conservative endpoint. Forked/replayed sources are left to archive timing
 // rather than mixing the parent and child timelines. An optional source path
 // resolves continuation page identities using the normal Codex parser rules.
 func ReadSessionTiming(ctx context.Context, source io.Reader, agent string, sourcePath ...string) (*SessionTimingEvidence, error) {
@@ -84,10 +84,10 @@ func ReadSessionTiming(ctx context.Context, source io.Reader, agent string, sour
 		delete(calls, id)
 		delete(ambiguousCalls, id)
 	}
-	var prompt, lastAssistant int64
+	var prompt, lastClaudeActivity int64
 	closeClaude := func() {
-		if prompt > 0 && lastAssistant >= prompt {
-			out.Turns = append(out.Turns, TimingInterval{prompt, lastAssistant})
+		if prompt > 0 && lastClaudeActivity >= prompt {
+			out.Turns = append(out.Turns, TimingInterval{prompt, lastClaudeActivity})
 		}
 	}
 	bounded := &io.LimitedReader{R: source, N: (256 << 20) + 1}
@@ -214,11 +214,24 @@ func ReadSessionTiming(ctx context.Context, source io.Reader, agent string, sour
 				return true
 			})
 			if kind == "user" && !isResult {
+				// Native transcripts also encode interruption markers, IDE
+				// context, and task notifications as user entries. Match the
+				// provider's classification so these do not split a real turn.
+				text, skip := preprocessClaudeUserText(extractCompactSummary(entry.Raw))
+				if skip || classifyClaudeSystemMessage(text) != "" {
+					continue
+				}
 				closeClaude()
-				prompt, lastAssistant = stamp, 0
+				prompt, lastClaudeActivity = stamp, 0
+			}
+			// A tool result proves activity even if the process stops before
+			// another assistant message is written. Keep its known waiting
+			// interval inside this turn without extending it to wall time.
+			if kind == "user" && isResult {
+				lastClaudeActivity = max(lastClaudeActivity, stamp)
 			}
 			if kind == "assistant" {
-				lastAssistant = stamp
+				lastClaudeActivity = max(lastClaudeActivity, stamp)
 				if duration := entry.Get("thinkingDurationMs").Int(); duration > 0 && duration <= stamp {
 					out.Model = append(out.Model, TimingInterval{stamp - duration, stamp})
 				}

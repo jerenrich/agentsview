@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json/v2"
+	"fmt"
 	"strings"
 	"time"
 
@@ -102,32 +103,61 @@ type CallRow struct {
 // GetSessionTiming computes the per-session timing summary. Returns
 // (nil, nil) when the session does not exist (mirrors GetSession's
 // contract; the HTTP handler turns this into a 404).
-func (db *DB) GetSessionTiming(
-	ctx context.Context, sessionID string,
-) (*SessionTiming, error) {
-	sess, err := db.GetSessionFull(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	if sess == nil {
-		return nil, nil
-	}
-
-	turnRows, err := db.queryTurnRows(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	callRows, err := db.queryCallRows(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	return db.assembleArchivedTiming(ctx, sess, turnRows, callRows)
+func (db *DB) GetSessionTiming(ctx context.Context, sessionID string) (*SessionTiming, error) {
+	return db.getSessionTiming(ctx, sessionID, nil)
 }
 
-func (db *DB) queryTurnRows(
-	ctx context.Context, sessionID string,
+// All archived inputs share one committed SQLite snapshot. Release it before
+// optional legacy source I/O so decompression cannot pin the archive WAL.
+func (db *DB) getSessionTiming(ctx context.Context, sessionID string, afterSession func()) (*SessionTiming, error) {
+	tx, err := db.getReader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("beginning timing snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	sess, err := scanSessionFullRow(tx.QueryRowContext(ctx, "SELECT "+sessionFullCols+" FROM sessions WHERE id=?", sessionID), sessionID)
+	if err != nil || sess == nil {
+		return nil, err
+	}
+	if sess.DeletedAt != nil {
+		return nil, nil
+	}
+	if afterSession != nil {
+		afterSession()
+	}
+	turns, err := queryTimingTurnRows(ctx, tx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	calls, err := queryTimingCallRows(ctx, tx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	source, err := storedTimingEvidenceWithQuerier(ctx, tx, sess)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("closing timing snapshot: %w", err)
+	}
+	persisted := source != nil
+	if source == nil {
+		source = readTimingSource(ctx, sess)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	out := AssembleTiming(sess, turns, calls, time.Now().UTC(), source)
+	if persisted {
+		out.Coverage.Evidence = "persisted"
+	}
+	return out, nil
+}
+
+func queryTimingTurnRows(
+	ctx context.Context, q messageRowsQuerier, sessionID string,
 ) ([]TurnRow, error) {
-	rows, err := db.getReader().QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT
 		  m2.id, m2.ordinal, m2.timestamp, m2.has_tool_use,
 		  CASE
@@ -187,10 +217,10 @@ func (db *DB) queryTurnRows(
 	return out, rows.Err()
 }
 
-func (db *DB) queryCallRows(
-	ctx context.Context, sessionID string,
+func queryTimingCallRows(
+	ctx context.Context, q messageRowsQuerier, sessionID string,
 ) ([]CallRow, error) {
-	rows, err := db.getReader().QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT
 		  tc.message_id,
 		  tc.tool_use_id,
