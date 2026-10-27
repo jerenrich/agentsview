@@ -264,6 +264,8 @@ still exist. Unreadable captures preserve existing records; changed source
 bindings cannot reuse them. Orphan, trash, and replacement copies retain evidence.
 Data version 149 reparses local Codex and Claude sources in place to populate it;
 missing sources retain their archived transcripts and report coverage gaps.
+Data version 150 backfills Codex continuation pages using the provider’s exact
+filename/header identity rules, including older page headers.
 
 The timing API reports evidence provenance, recorded or estimated turn boundaries,
 model interval count, and timed versus total tool calls, with separate execution,

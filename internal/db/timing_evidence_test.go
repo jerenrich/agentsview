@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -220,4 +222,47 @@ func TestArchivedTimingReplacementCopyKeepsOriginalEvidence(t *testing.T) {
 	require.NotNil(t, copied)
 	assert.Equal(t, before.Coverage, copied.Coverage)
 	assert.Equal(t, before.ActivityTotals, copied.ActivityTotals)
+}
+
+func TestArchivedTimingContinuationPage(t *testing.T) {
+	for _, compressed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("compressed=%t", compressed), func(t *testing.T) {
+			d := testDB(t)
+			s := archivedTimingFixture(t, d)
+			thread := "11111111-1111-4111-8111-111111111111"
+			rollout := "22222222-2222-4222-8222-222222222222"
+			key := thread + "_" + rollout
+			bytes, err := os.ReadFile(*s.FilePath)
+			require.NoError(t, err)
+			bytes = []byte(strings.ReplaceAll(string(bytes), `"id":"retained"`, `"id":"`+thread+`"`))
+			path := filepath.Join(t.TempDir(), "rollout-2026-04-26T10-00-00-"+key+".jsonl")
+			if compressed {
+				encoder, err := zstd.NewWriter(nil)
+				require.NoError(t, err)
+				bytes = encoder.EncodeAll(bytes, nil)
+				encoder.Close()
+				path += ".zst"
+			}
+			require.NoError(t, os.WriteFile(path, bytes, 0600))
+			info, err := os.Stat(path)
+			require.NoError(t, err)
+			digest := sha256.Sum256(bytes)
+			hash := hex.EncodeToString(digest[:])
+			s.ID = "codex:" + key
+			s.FilePath = &path
+			s.FileSize = new(info.Size())
+			s.FileMtime = new(info.ModTime().UnixNano())
+			s.FileHash = &hash
+			require.NoError(t, d.UpsertSession(t.Context(), s))
+			before, err := d.GetSessionTiming(t.Context(), s.ID)
+			require.NoError(t, err)
+			require.Equal(t, "persisted", before.Coverage.Evidence)
+			assert.Equal(t, 1, before.Coverage.RecordedTurns)
+			assert.Equal(t, int64(6000), before.ActiveDurationMs)
+			require.NoError(t, os.Remove(path))
+			after, err := d.GetSessionTiming(t.Context(), s.ID)
+			require.NoError(t, err)
+			assert.Equal(t, before, after)
+		})
+	}
 }

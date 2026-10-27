@@ -91,9 +91,9 @@ func readTimingSource(ctx context.Context, sess *Session) *parser.SessionTimingE
 			digest := sha256.New()
 			reader := io.TeeReader(bounded, digest)
 			if strings.HasSuffix(path, ".jsonl.zst") {
-				evidence, err = parser.ReadCompressedSessionTiming(ctx, reader, sess.Agent)
+				evidence, err = parser.ReadCompressedSessionTiming(ctx, reader, sess.Agent, path)
 			} else {
-				evidence, err = parser.ReadSessionTiming(ctx, reader, sess.Agent)
+				evidence, err = parser.ReadSessionTiming(ctx, reader, sess.Agent, path)
 			}
 			if err == nil {
 				_, err = io.Copy(io.Discard, reader)

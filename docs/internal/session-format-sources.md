@@ -612,7 +612,9 @@ fixtures retain this field; missing identities remain source-local.
   hash and size; deleting the rollout does not change the resulting breakdown.
   Coverage counts describe observed intervals, without assuming all model
   intervals were logged. Forked/subagent rollouts remain unsupported by this
-  activity reader.
+  activity reader. Continuation pages use the same exact filename/header
+  identity rules as normalized ingestion; modern thread-ID and older rollout-ID
+  headers were reverified against page fixtures and copied logs.
 
 - **Activity timing (2026-10-27):** Reverified against copied local rollouts
   and `session_timing_test.go` fixtures. `task_started` through `task_complete`

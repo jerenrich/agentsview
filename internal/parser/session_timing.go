@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"go.kenn.io/agentsview/internal/ctxio"
@@ -35,20 +36,21 @@ var ErrTimingSourceUnsupported = errors.New("unsupported timing source")
 
 // ReadCompressedSessionTiming decodes the same JSONL evidence using the shared
 // bounded streaming decoder. The caller bounds the imported compressed prefix.
-func ReadCompressedSessionTiming(ctx context.Context, source io.Reader, agent string) (*SessionTimingEvidence, error) {
+func ReadCompressedSessionTiming(ctx context.Context, source io.Reader, agent string, sourcePath ...string) (*SessionTimingEvidence, error) {
 	decoder, err := newZstdStreamDecoder(ctxio.Reader{Context: ctx, Reader: source})
 	if err != nil {
 		return nil, err
 	}
 	defer decoder.Close()
-	return ReadSessionTiming(ctx, decoder, agent)
+	return ReadSessionTiming(ctx, decoder, agent, sourcePath...)
 }
 
 // ReadSessionTiming reads a bounded, already-imported source snapshot. Codex
 // lifecycle events close turns; Claude's final assistant timestamp provides a
 // conservative endpoint. Forked/replayed sources are left to archive timing
-// rather than mixing the parent and child timelines.
-func ReadSessionTiming(ctx context.Context, source io.Reader, agent string) (*SessionTimingEvidence, error) {
+// rather than mixing the parent and child timelines. An optional source path
+// resolves continuation page identities using the normal Codex parser rules.
+func ReadSessionTiming(ctx context.Context, source io.Reader, agent string, sourcePath ...string) (*SessionTimingEvidence, error) {
 	if agent != string(AgentCodex) && agent != string(AgentClaude) {
 		return nil, ErrTimingSourceUnsupported
 	}
@@ -106,6 +108,16 @@ func ReadSessionTiming(ctx context.Context, source io.Reader, agent string) (*Se
 				return nil, ErrTimingSourceUnsupported
 			}
 			id := payload.Get("id").Str
+			// Use the same exact filename/header checks as normalized ingestion.
+			// A continuation page has a distinct archive identity even when its
+			// header identifies the thread (or an older header identifies the rollout).
+			if len(sourcePath) > 0 {
+				path := sourcePath[0]
+				thread := codexRevertPageThreadID(CodexSessionUUIDFromFilename(filepath.Base(path)), id, payload.Get("session_id").Str)
+				if page, _, ok := codexRevertPage(path, thread, "", "", false); ok {
+					id = page
+				}
+			}
 			if out.SourceID != "" && id != "" && out.SourceID != id {
 				return nil, ErrTimingSourceUnsupported
 			}

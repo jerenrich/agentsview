@@ -608,7 +608,7 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // VS Code-format sources in place; source and session identities are unchanged.)
 // (148: retain explicit completed-item execution endpoints in Codex-format
 // sources. Re-parse in place; source and session identities are unchanged.)
-const dataVersion = 149
+const dataVersion = 150
 
 const archiveOnlyVersionBase = 1 << 20
 

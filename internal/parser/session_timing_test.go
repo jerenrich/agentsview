@@ -174,3 +174,21 @@ func TestReadSessionTimingDoesNotRetainLargeToolBodies(t *testing.T) {
 	runtime.KeepAlive(evidence)
 	assert.Less(t, int64(after.HeapAlloc)-int64(before.HeapAlloc), int64(8<<20), "timing identifiers must not retain transcript bodies")
 }
+
+func TestReadSessionTimingContinuationIdentity(t *testing.T) {
+	page := revertThread + "_" + revertRollout
+	path := "rollout-2026-09-01T10-00-00-" + page + ".jsonl"
+	for _, tc := range []struct{ name, header, session, want string }{
+		{"modern", revertThread, "", page},
+		{"older", revertRollout, revertThread, page},
+		{"wrong thread", revertOther, "", revertOther},
+		{"wrong older thread", revertRollout, revertOther, revertRollout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := revertPageMeta(tc.header, "", sessionIDField(tc.session)) + "\n"
+			evidence, err := ReadSessionTiming(t.Context(), strings.NewReader(source), "codex", path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, evidence.SourceID)
+		})
+	}
+}
