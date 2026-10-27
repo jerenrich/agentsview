@@ -16529,6 +16529,16 @@ func (e *Engine) tryIncrementalJSONL(
 	}
 
 	if isCodexFormatAgent(agent) {
+		var safe bool
+		toolCallUpdates, safe, err = e.resolveCodexTimingUpdates(ctx, inc.ID, toolCallUpdates)
+		if err != nil {
+			lease.Release()
+			return processResult{err: err}, true
+		}
+		if !safe {
+			lease.Release()
+			return processResult{forceReplace: true}, false
+		}
 		prepareCodexResultIdentities(newMsgs, toolCallUpdates)
 	}
 	if len(toolCallUpdates) > 0 {

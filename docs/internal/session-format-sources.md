@@ -591,6 +591,30 @@ fixtures retain this field; missing identities remain source-local.
 
 ## Codex (`codex`)
 
+- **Execution timing (checked 2026-10-27):** Codex's
+  [`ItemCompletedEvent`](https://github.com/openai/codex/blob/2cab11ca40aad193382348a7bda46da2fc47596a/codex-rs/protocol/src/protocol.rs#L2154-L2165)
+  carries an optional `started_at_ms` and a `completed_at_ms` that older records
+  may omit. The
+  [rollout persistence policy](https://github.com/openai/codex/blob/2cab11ca40aad193382348a7bda46da2fc47596a/codex-rs/rollout/src/policy.rs#L229-L283)
+  retains completed execution items in paginated history. The
+  [command emitter](https://github.com/openai/codex/blob/2cab11ca40aad193382348a7bda46da2fc47596a/codex-rs/core/src/tools/events.rs#L567-L591)
+  and [MCP emitter](https://github.com/openai/codex/blob/2cab11ca40aad193382348a7bda46da2fc47596a/codex-rs/core/src/mcp_tool_call.rs#L1085-L1105)
+  use the tool call ID as the execution item's ID. AgentsView normalizes
+  completed or failed `CommandExecution` and `McpToolCall` items with valid,
+  ordered integer endpoints into content-free `tool_execution` events. Both
+  endpoints must be present; neither envelope timestamps, output delivery times,
+  nor reported duration alone supply a missing boundary. Existing result events
+  keep the tool output. IDs match exactly; nested code-mode executions with
+  different IDs are not attributed to an outer call. Other item kinds and
+  incomplete executions remain unmeasured. Data version 148 reparses Codex,
+  TraeX, and Augure Code sources in place without changing source or session
+  identities. Parser and sync regressions cover duplicate records, failed and
+  zero-duration executions, malformed endpoints, overlapping intervals, blocked
+  output, and late completion records after a checkpoint. Late timing updates
+  use an indexed exact-ID lookup limited to two occurrences: a unique target
+  can be updated incrementally, unknown IDs are discarded, and reused IDs use
+  the existing authoritative full-parse fallback.
+
 - **Dialogue classification (checked 2026-10-22):** The pinned
   [response schema](https://github.com/openai/codex/blob/c71297b9a9b3f7995445eff8d768837814ac06f8/codex-rs/protocol/src/models.rs#L31-L96)
   distinguishes message text, reasoning and tool operations. The existing

@@ -32,6 +32,9 @@ The latest release is
 
 **Improvements**
 
+- Codex command and MCP calls show measured execution durations when completed
+  items record both endpoints and identify the call. Calls without that evidence
+  remain unknown. The upgrade reparses available Codex-format sources in place.
 - `pg push` saves download traffic when a session grows by comparing short
   hashes with PostgreSQL instead of downloading the session's old text.
   Sessions with rows written before control-character cleanup are rewritten once.

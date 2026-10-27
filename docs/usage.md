@@ -987,6 +987,13 @@ zero remains `0ms`. Categories remain available as filters even without timing.
 An open child needs a completed execution interval before its call can show a
 duration; otherwise it stays unknown until the child closes.
 
+**Unreleased:** Codex command and MCP calls can also use a completed execution
+item's explicit start and end timestamps when its ID matches the recorded call.
+Older records without both timestamps and nested code-mode executions whose IDs
+do not match an outer call remain unknown. Message gaps and tool-output delivery
+times are not used as execution boundaries. Available Codex-format sources are
+reparsed on upgrade; sessions whose sources are missing keep their stored data.
+
 Session tool and category totals count only time within the session boundaries.
 Individual calls retain their full measured durations, including any time
 outside the parent session. Overlapping calls count once in the session total
