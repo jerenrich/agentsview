@@ -2860,5 +2860,9 @@
   "status_bar_codex_cloud_live_attention": "Codex Cloud：即時權杖需要處理",
   "status_bar_codex_cloud_oldest_failure": "最早的失敗：{time}",
   "status_bar_codex_cloud_last_success": "上次成功同步：{time}",
-  "status_bar_codex_cloud_homes": "Codex 主目錄：{homes}"
+  "status_bar_codex_cloud_homes": "Codex 主目錄：{homes}",
+  "call_row_duration_execution": "記錄的執行時間",
+  "call_row_duration_caller_wait": "從請求到結果的等待時間，包括分派和核准",
+  "call_row_duration_subagent": "關聯子代理的活動時間",
+  "session_vitals_activity_archive_hint": "活動時段根據封存訊息估算。缺少完成記錄時可能包含閒置時間。"
 }

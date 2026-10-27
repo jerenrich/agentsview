@@ -1070,6 +1070,8 @@ components:
           type:
             - integer
             - "null"
+        duration_source:
+          type: string
         input_preview:
           type: string
         is_parallel:
@@ -2989,6 +2991,8 @@ components:
         idle_duration_ms:
           format: int64
           type: integer
+        model_timing_available:
+          type: boolean
         running:
           type: boolean
         session_id:

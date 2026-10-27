@@ -224,6 +224,81 @@ describe("SessionVitals", () => {
     scroll.mockRestore();
   });
 
+  it.each([
+    { source: "source", expected: "Recorded reasoning" },
+    { source: "", expected: "estimated from archived messages" },
+  ])("explains $source boundary evidence", async ({ source, expected }) => {
+    mocks.fetchSessionTiming.mockResolvedValue({ ...mocks.timing, timing_source: source });
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await tick();
+    await tick();
+    expect(document.querySelector(".activity-section .activity-hint")?.textContent).toContain(
+      expected,
+    );
+  });
+
+  it("navigates a reused call ID to its actual message", async () => {
+    const timing = timingWithCall();
+    const first = timing.turns[0]!;
+    timing.turns.push({
+      ...first,
+      message_id: 2,
+      ordinal: 17,
+      calls: [{ ...first.calls[0]!, duration_ms: 900 }],
+    });
+    timing.slowest_call = { ...timing.turns[1]!.calls[0]! };
+    mocks.fetchSessionTiming.mockResolvedValue(timing);
+    const scroll = vi.spyOn(ui, "scrollToOrdinal");
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: traceSession },
+    });
+    await tick();
+    await tick();
+    document.querySelector<HTMLButtonElement>(".stat-grid .val-link")!.click();
+    expect(scroll).toHaveBeenCalledWith(17);
+    scroll.mockRestore();
+  });
+
+  it("shows model timing as unmeasured when readable logs contain no model intervals", async () => {
+    mocks.fetchSessionTiming.mockResolvedValue({
+      ...mocks.timing,
+      timing_source: "source",
+      active_duration_ms: 1000,
+      activity_totals: { tool_ms: 0, unattributed_ms: 1000 },
+    });
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await tick();
+    await tick();
+    expect(document.querySelector(".activity-totals")?.textContent).toContain(
+      "Recorded model · Not measured",
+    );
+  });
+
+  it.each([
+    { source: "execution", label: "Recorded execution" },
+    { source: "caller_wait", label: "Request-to-result waiting, including dispatch and approvals" },
+    { source: "subagent", label: "Linked subagent lifetime" },
+  ])("identifies $source duration evidence", async ({ source, label }) => {
+    const timing = timingWithCall();
+    timing.turns[0]!.calls[0]!.duration_ms = 1000;
+    timing.turns[0]!.calls[0]!.duration_source = source;
+    mocks.fetchSessionTiming.mockResolvedValue(timing);
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await tick();
+    await tick();
+    expect(document.querySelector(".calls .cd")?.getAttribute("title")).toBe(label);
+  });
+
   it("renders model, tool and unattributed time without idle gaps", async () => {
     mocks.fetchSessionTiming.mockResolvedValue({
       ...mocks.timing,

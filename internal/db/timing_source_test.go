@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,6 +147,7 @@ func TestTimingActivityLifecycleWithoutVisiblePrompt(t *testing.T) {
 			assert.Equal(t, stamp(0), got.Activity[0].StartedAt)
 			require.NotNil(t, got.SlowestCall)
 			assert.Equal(t, new(int64(1000)), got.SlowestCall.DurationMs, "execution endpoints must survive paired wait enrichment")
+			assert.Equal(t, "execution", got.SlowestCall.DurationSource)
 		})
 	}
 }
@@ -189,4 +191,176 @@ func TestTimingLifecycleAnchorSkipsHiddenMessages(t *testing.T) {
 	assert.Equal(t, int64(1), got.Activity[0].MessageID)
 	assert.Equal(t, 0, got.Activity[0].Ordinal)
 	assert.Equal(t, stamp(2), got.Activity[0].StartedAt)
+}
+
+func TestSourceTimingRejectsAmbiguousRepeatedCallMatches(t *testing.T) {
+	epoch := time.Date(2026, 4, 26, 10, 0, 0, 0, time.UTC).UnixMilli()
+	stamp := func(ms int64) string { return time.UnixMilli(epoch + ms).UTC().Format(time.RFC3339Nano) }
+	for _, tc := range []struct {
+		name     string
+		starts   []int64
+		requests []int64
+		want     []bool
+	}{
+		{"collision", []int64{1000, 1200}, []int64{1100}, []bool{false, false}},
+		{"tie", []int64{1000}, []int64{900, 1100}, []bool{false}},
+		{"distinct", []int64{1000, 3000}, []int64{1000, 3000}, []bool{true, true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rows []TurnRow
+			var calls []CallRow
+			source := &parser.SessionTimingEvidence{}
+			for i, start := range tc.starts {
+				rows = append(rows, TurnRow{MessageID: int64(i + 1), Timestamp: stamp(start)})
+				calls = append(calls, CallRow{MessageID: int64(i + 1), ToolUseID: "same"})
+			}
+			for _, start := range tc.requests {
+				source.Calls = append(source.Calls, parser.TimingCall{ID: "same", TimingInterval: parser.TimingInterval{Start: epoch + start, End: epoch + start + 500}})
+			}
+			got := sourceTimedCalls(rows, calls, source)
+			for i, want := range tc.want {
+				assert.Equal(t, want, got[i].HasWait)
+			}
+		})
+	}
+}
+
+func TestTimingFallbackTotalsExcludeTimeBeforeFirstPrompt(t *testing.T) {
+	got := AssembleTiming(&Session{StartedAt: new("2026-04-26T10:00:00Z"), EndedAt: new("2026-04-26T10:00:06Z")},
+		[]TurnRow{{MessageID: 1, Role: "user", ContentLength: 1, Timestamp: "2026-04-26T10:00:03Z"}, {MessageID: 2, HasToolUse: true, Role: "assistant", Timestamp: "2026-04-26T10:00:04Z"}},
+		[]CallRow{{MessageID: 2, ExecutionStart: "2026-04-26T10:00:02Z", ExecutionEnd: "2026-04-26T10:00:04Z"}}, time.Time{})
+	assert.Equal(t, got.ActivityTotals.ToolMs, got.ToolDurationMs)
+	assert.Equal(t, int64(1000), got.ToolDurationMs)
+}
+
+func TestTimingSourceRequiresKnownImportedSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "timing.jsonl")
+	source := `{"timestamp":"2026-04-26T10:00:00Z","type":"session_meta","payload":{"id":"timing"}}` + "\n"
+	require.NoError(t, os.WriteFile(path, []byte(source), 0600))
+	for _, size := range []*int64{nil, new(int64(0)), new(int64(-1))} {
+		assert.Nil(t, readTimingSource(t.Context(), &Session{ID: "codex:timing", Agent: "codex", FilePath: &path, FileSize: size}), "an unknown import boundary must not read unimported data")
+	}
+}
+
+func TestTimingSourceNegativeCacheAndSnapshotReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "timing.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte("not json\n"), 0600))
+	sess := &Session{ID: "codex:timing", Agent: "codex", FilePath: &path, FileSize: new(int64(9))}
+	assert.Nil(t, readTimingSource(t.Context(), sess))
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	evidence, found := cachedTimingSource(timingSourceEntry{path: path, agent: "codex", limit: 9, info: info})
+	assert.True(t, found, "a malformed snapshot must not be rescanned on every request")
+	assert.Nil(t, evidence)
+	valid := `{"timestamp":"2026-04-26T10:00:00Z","type":"session_meta","payload":{"id":"timing"}}` + "\n"
+	require.NoError(t, os.WriteFile(path, []byte(valid), 0600))
+	sess.FileSize = new(int64(len(valid)))
+	require.NotNil(t, readTimingSource(t.Context(), sess))
+	timingSources.Lock()
+	defer timingSources.Unlock()
+	count := 0
+	for _, entry := range timingSources.entries {
+		if entry.path == path {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "replace old snapshots instead of consuming another cache slot")
+}
+
+func TestTimingSourceCancellationWhileReadersBusy(t *testing.T) {
+	for i := 0; i < cap(timingSourceReads); i++ {
+		timingSourceReads <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < cap(timingSourceReads); i++ {
+			<-timingSourceReads
+		}
+	}()
+	path := filepath.Join(t.TempDir(), "timing.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte("{}\n"), 0600))
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan *parser.SessionTimingEvidence, 1)
+	go func() {
+		done <- readTimingSource(ctx, &Session{ID: "codex:busy", Agent: "codex", FilePath: &path, FileSize: new(int64(3))})
+	}()
+	cancel()
+	select {
+	case got := <-done:
+		assert.Nil(t, got)
+	case <-time.After(time.Second):
+		t.Fatal("reader did not honor cancellation")
+	}
+}
+
+func TestTimingLifecycleKeepsTouchingTurnsAndCurrentNavigationAnchor(t *testing.T) {
+	epoch := time.Date(2026, 4, 26, 10, 0, 0, 0, time.UTC).UnixMilli()
+	stamp := func(ms int64) string { return time.UnixMilli(epoch + ms).UTC().Format(time.RFC3339Nano) }
+	got := AssembleTiming(&Session{StartedAt: new(stamp(0)), EndedAt: new(stamp(2000))}, []TurnRow{
+		{MessageID: 1, Ordinal: 0, Role: "user", ContentLength: 1, Timestamp: stamp(0)},
+		{MessageID: 2, Ordinal: 1, Role: "user", ContentLength: 1, Timestamp: stamp(1100)},
+	}, nil, time.Time{}, &parser.SessionTimingEvidence{Turns: []parser.TimingInterval{{Start: epoch, End: epoch + 1000}, {Start: epoch + 1000, End: epoch + 2000}}})
+	require.Len(t, got.Activity, 2, "touching turns must remain separate navigation rows")
+	assert.Equal(t, int64(2000), got.ActiveDurationMs)
+	assert.Zero(t, got.IdleDurationMs)
+	assert.Equal(t, int64(2), got.Activity[1].MessageID, "a prompt delivered after task_started must not navigate to the previous turn")
+}
+
+func TestTimingAccountingWithMissingOrReversedSessionBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		start, end *string
+	}{
+		{"missing start", nil, new("2026-04-26T10:00:06Z")},
+		{"reversed bounds", new("2026-04-26T10:00:07Z"), new("2026-04-26T10:00:06Z")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AssembleTiming(&Session{StartedAt: tc.start, EndedAt: tc.end}, []TurnRow{
+				{Role: "user", ContentLength: 1, Timestamp: "2026-04-26T10:00:00Z"},
+				{Role: "assistant", Timestamp: "2026-04-26T10:00:06Z"},
+			}, nil, time.Time{})
+			assert.GreaterOrEqual(t, got.TotalDurationMs, int64(0))
+			assert.Equal(t, got.TotalDurationMs, got.ActiveDurationMs+got.IdleDurationMs)
+			assert.Equal(t, got.ActiveDurationMs, got.ActivityTotals.ModelMs+got.ActivityTotals.ToolMs+got.ActivityTotals.UnattributedMs)
+			if tc.start == nil {
+				assert.Equal(t, int64(6000), got.ActiveDurationMs)
+			}
+		})
+	}
+}
+
+func TestTimingSourceConcurrentReads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "timing.jsonl")
+	source := `{"timestamp":"2026-04-26T10:00:00Z","type":"session_meta","payload":{"id":"timing"}}` + "\n"
+	require.NoError(t, os.WriteFile(path, []byte(source), 0600))
+	sess := &Session{ID: "codex:timing", Agent: "codex", FilePath: &path, FileSize: new(int64(len(source)))}
+	results := make(chan *parser.SessionTimingEvidence, 16)
+	for i := 0; i < cap(results); i++ {
+		go func() { results <- readTimingSource(t.Context(), sess) }()
+	}
+	for i := 0; i < cap(results); i++ {
+		select {
+		case result := <-results:
+			require.NotNil(t, result)
+			assert.Equal(t, "timing", result.SourceID)
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent source reads did not complete")
+		}
+	}
+	timingSources.Lock()
+	defer timingSources.Unlock()
+	count := 0
+	for _, entry := range timingSources.entries {
+		if entry.path == path {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "racing reads must not retain duplicate snapshots")
+}
+
+func TestTimingModelEvidenceDoesNotImplyRecordedTurnBoundaries(t *testing.T) {
+	epoch := time.Date(2026, 4, 26, 10, 0, 0, 0, time.UTC).UnixMilli()
+	got := AssembleTiming(&Session{StartedAt: new("2026-04-26T10:00:00Z"), EndedAt: new("2026-04-26T10:00:01Z")}, []TurnRow{{Role: "user", ContentLength: 1, Timestamp: "2026-04-26T10:00:00Z"}}, nil, time.Time{}, &parser.SessionTimingEvidence{Model: []parser.TimingInterval{{Start: epoch, End: epoch + 500}}})
+	assert.True(t, got.ModelTimingAvailable)
+	assert.Empty(t, got.TimingSource, "model evidence must not label estimated windows as recorded lifecycle boundaries")
+	assert.Equal(t, int64(500), got.ActivityTotals.ModelMs)
 }

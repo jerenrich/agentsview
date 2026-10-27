@@ -226,9 +226,10 @@
 
   function turnForCall(call: CallTiming): TurnTiming | undefined {
     if (!timing) return undefined;
-    return timing.turns.find((t) =>
-      t.calls.some((c) => c.tool_use_id === call.tool_use_id),
-    );
+    const direct = timing.turns.find((turn) => turn.calls.includes(call));
+    if (direct) return direct;
+    const matches = timing.turns.filter((turn) => turn.calls.some((candidate) => candidate.tool_use_id === call.tool_use_id));
+    return matches.length === 1 ? matches[0] : undefined;
   }
 
   function scrollToCall(call: CallTiming) {
@@ -237,20 +238,24 @@
   }
 
   // Cache the largest measured call once per timing snapshot.
-  const maxCallMsCache = new WeakMap<SessionTiming, number>();
+  const maxCallCache = new WeakMap<SessionTiming, CallTiming | null>();
 
-  function maxCallMs(t: SessionTiming): number {
-    const cached = maxCallMsCache.get(t);
-    if (cached !== undefined) return cached;
-    let max = 0;
+  function longestCall(t: SessionTiming): CallTiming | null {
+    if (maxCallCache.has(t)) return maxCallCache.get(t)!;
+    let longest: CallTiming | null = null;
     for (const turn of t.turns) {
       for (const call of turn.calls) {
-        const d = call.duration_ms ?? 0;
-        if (d > max) max = d;
+        if (call.duration_ms != null && (longest == null || call.duration_ms > longest.duration_ms!)) longest = call;
       }
     }
-    maxCallMsCache.set(t, max);
-    return max;
+    maxCallCache.set(t, longest);
+    return longest;
+  }
+
+  let slowestCall = $derived(timing ? longestCall(timing) : null);
+
+  function maxCallMs(t: SessionTiming): number {
+    return longestCall(t)?.duration_ms ?? 0;
   }
 
   function callBarPct(c: CallTiming, t: SessionTiming): number {
@@ -456,8 +461,8 @@
           </div>
           <div>
             <div class="lbl">{m.session_vitals_slowest_call()}</div>
-            {#if timing.slowest_call}
-              {@const slowest = timing.slowest_call}
+            {#if slowestCall}
+              {@const slowest = slowestCall}
               <button
                 type="button"
                 class="val slow val-link"
@@ -491,7 +496,7 @@
         <span>{m.session_vitals_activity()}</span>
         <span class="v-meta">{m.session_vitals_active_duration({ duration: formatDuration(timing.active_duration_ms ?? timing.activity.reduce((sum, row) => sum + row.duration_ms, 0)) })}</span>
       </header>
-      <p class="activity-hint">{m.session_vitals_activity_hint()}</p>
+      <p class="activity-hint">{timing.timing_source === "source" ? m.session_vitals_activity_hint() : m.session_vitals_activity_archive_hint()}</p>
       {#if (timing.idle_duration_ms ?? 0) > 0}
         <p class="activity-hint">{m.session_vitals_idle_excluded({ duration: formatDuration(timing.idle_duration_ms ?? 0) })}</p>
       {/if}
@@ -499,7 +504,7 @@
         {#each activityKinds as { kind, label } (kind)}
           <span>
             <span class="legend-dot" style="background: {activityToken(kind)};"></span>
-            {label} · {((kind === "tool" && !toolTimeMeasured) || (kind === "model" && timing.timing_source !== "source" && activityTotal(kind) === 0)) ? m.session_vitals_not_measured() : formatDuration(activityTotal(kind))}
+            {label} · {((kind === "tool" && !toolTimeMeasured) || (kind === "model" && !timing.model_timing_available && activityTotal(kind) === 0)) ? m.session_vitals_not_measured() : formatDuration(activityTotal(kind))}
           </span>
         {/each}
       </div>

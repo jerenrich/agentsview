@@ -15,21 +15,24 @@ import (
 // All durations are in milliseconds. *int64 fields are null when the
 // underlying execution interval is unknown or incomplete.
 type SessionTiming struct {
-	ActiveDurationMs int64           `json:"active_duration_ms,omitzero"`
-	IdleDurationMs   int64           `json:"idle_duration_ms,omitzero"`
-	TimingSource     string          `json:"timing_source,omitempty"`
-	SessionID        string          `json:"session_id"`
-	TotalDurationMs  int64           `json:"total_duration_ms"`
-	ToolDurationMs   int64           `json:"tool_duration_ms"`
-	TurnCount        int             `json:"turn_count"`
-	ToolCallCount    int             `json:"tool_call_count"`
-	SubagentCount    int             `json:"subagent_count"`
-	SlowestCall      *CallTiming     `json:"slowest_call"`
-	ByCategory       []CategoryTotal `json:"by_category"`
-	Turns            []TurnTiming    `json:"turns"`
-	Running          bool            `json:"running"`
-	Activity         []TurnActivity  `json:"activity"`
-	ActivityTotals   ActivityTotals  `json:"activity_totals"`
+	// ModelTimingAvailable means at least one explicit model interval was recorded,
+	// including a zero-duration interval; it does not imply complete coverage.
+	ModelTimingAvailable bool            `json:"model_timing_available,omitzero"`
+	ActiveDurationMs     int64           `json:"active_duration_ms,omitzero"`
+	IdleDurationMs       int64           `json:"idle_duration_ms,omitzero"`
+	TimingSource         string          `json:"timing_source,omitempty"`
+	SessionID            string          `json:"session_id"`
+	TotalDurationMs      int64           `json:"total_duration_ms"`
+	ToolDurationMs       int64           `json:"tool_duration_ms"`
+	TurnCount            int             `json:"turn_count"`
+	ToolCallCount        int             `json:"tool_call_count"`
+	SubagentCount        int             `json:"subagent_count"`
+	SlowestCall          *CallTiming     `json:"slowest_call"`
+	ByCategory           []CategoryTotal `json:"by_category"`
+	Turns                []TurnTiming    `json:"turns"`
+	Running              bool            `json:"running"`
+	Activity             []TurnActivity  `json:"activity"`
+	ActivityTotals       ActivityTotals  `json:"activity_totals"`
 }
 
 type CategoryTotal struct {
@@ -48,6 +51,8 @@ type TurnTiming struct {
 }
 
 type CallTiming struct {
+	// DurationSource identifies execution, caller_wait, or subagent evidence.
+	DurationSource    string  `json:"duration_source,omitempty"`
 	ToolUseID         string  `json:"tool_use_id"`
 	ToolName          string  `json:"tool_name"`
 	Category          string  `json:"category"`
@@ -312,10 +317,12 @@ func AssembleTiming(
 		if interval := intervals[i]; interval != nil {
 			v := interval.end - interval.start
 			c.DurationMs = &v
+			_, c.DurationSource, _ = measuredCallEvidence(r)
 		}
 		callsByMsg[r.MessageID] = append(callsByMsg[r.MessageID], c)
 	}
 
+	completedBoundaries := completedCallBoundaries(calls)
 	for _, t := range turns {
 		if !t.HasToolUse {
 			continue
@@ -325,7 +332,7 @@ func AssembleTiming(
 		if turnCalls == nil {
 			turnCalls = []CallTiming{}
 		}
-		if completedAt, ok := completedCallBoundary(calls, t.MessageID); ok {
+		if completedAt, ok := completedBoundaries[t.MessageID]; ok {
 			if start, valid := timingTimestamp(t.Timestamp); valid && completedAt >= start {
 				v := completedAt - start
 				t.DurationMs = &v
@@ -354,23 +361,28 @@ func AssembleTiming(
 	return out
 }
 
-func completedCallBoundary(calls []CallRow, messageID int64) (int64, bool) {
-	var boundary int64
-	matched := false
+// Resolve complete groups once; scanning every call again for every tool
+// message makes a large transcript quadratic.
+func completedCallBoundaries(calls []CallRow) map[int64]int64 {
+	boundaries := map[int64]int64{}
+	incomplete := map[int64]bool{}
 	for _, call := range calls {
-		if call.MessageID != messageID {
+		interval, ok := executionInterval(call)
+		if call.HasWait {
+			interval, ok = activityInterval{call.WaitStart, call.WaitEnd}, call.WaitEnd >= call.WaitStart
+		}
+		if !ok {
+			incomplete[call.MessageID] = true
 			continue
 		}
-		interval, ok := executionInterval(call)
-		if !ok {
-			return 0, false
+		if current, found := boundaries[call.MessageID]; !found || interval.end > current {
+			boundaries[call.MessageID] = interval.end
 		}
-		if !matched || interval.end > boundary {
-			boundary = interval.end
-		}
-		matched = true
 	}
-	return boundary, matched
+	for id := range incomplete {
+		delete(boundaries, id)
+	}
+	return boundaries
 }
 
 func primaryTimingCategory(calls []CallTiming) string {
@@ -397,7 +409,7 @@ func millisBetween(a, b string) int64 {
 	if err != nil {
 		return 0
 	}
-	return tb.Sub(ta).Milliseconds()
+	return max(0, tb.UnixMilli()-ta.UnixMilli())
 }
 
 // makeInputPreview returns a short snippet of the tool's input args,

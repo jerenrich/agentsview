@@ -986,8 +986,15 @@ intervals; it is client-observed activity, not server inference telemetry. Tool
 waiting uses matched request/result timestamps and can include dispatch and
 approval waits. Tool waits take precedence where model intervals overlap them.
 Parallel intervals count once. The remaining active time is unattributed.
+Abandoned Codex turns stop at their last observed assistant or tool activity; a
+later task never stretches them across an idle gap. Ambiguous reused call IDs
+remain unmeasured. Aggregate and category totals use the same active windows as
+the activity rows; individual call durations retain their original evidence.
 Missing or unsupported sources retain archive-only timing, with model time
-unmeasured. Forked and subagent sources use that fallback to avoid mixing replayed
+unmeasured. Readable sources without model intervals also show **Not measured**,
+rather than implying zero model work. The panel labels archive-derived activity
+windows as estimates: missing completion records can still include idle time. Individual call duration tooltips identify
+recorded execution, request-to-result waiting, or a linked subagent lifetime. Forked and subagent sources use that fallback to avoid mixing replayed
 parent activity into child sessions.
 
 Individual calls prefer explicit execution endpoints or a closed linked child;

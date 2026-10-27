@@ -48,13 +48,24 @@ func executionInterval(call CallRow) (activityInterval, bool) {
 	return parseClosedInterval(call.ExecutionStart, call.ExecutionEnd)
 }
 
-func measuredCallInterval(call CallRow) (activityInterval, bool) {
+func measuredCallEvidence(call CallRow) (activityInterval, string, bool) {
 	if call.SubagentSessionID != nil {
 		if interval, ok := parseClosedInterval(call.SubagentStart, call.SubagentEnd); ok {
-			return interval, true
+			return interval, "subagent", true
 		}
 	}
-	return executionInterval(call)
+	if interval, ok := executionInterval(call); ok {
+		return interval, "execution", true
+	}
+	if call.HasWait && call.WaitEnd >= call.WaitStart {
+		return activityInterval{call.WaitStart, call.WaitEnd}, "caller_wait", true
+	}
+	return activityInterval{}, "", false
+}
+
+func measuredCallInterval(call CallRow) (activityInterval, bool) {
+	interval, _, ok := measuredCallEvidence(call)
+	return interval, ok
 }
 
 // activityPrompts returns visible user prompts in timestamp order.
@@ -107,7 +118,10 @@ func assembleTurnActivity(
 
 	var sourceTurns, model []activityInterval
 	if source != nil {
-		out.TimingSource = "source"
+		if len(source.Turns) > 0 {
+			out.TimingSource = "source"
+		}
+		out.ModelTimingAvailable = len(source.Model) > 0
 		for _, interval := range source.Turns {
 			sourceTurns = append(sourceTurns, activityInterval{interval.Start, interval.End})
 		}
@@ -118,7 +132,7 @@ func assembleTurnActivity(
 	}
 	var windows []activityInterval
 	if len(sourceTurns) > 0 {
-		windows = activityMerge(sourceTurns)
+		windows = activityMergeIntervals(sourceTurns, false)
 		out.Activity = nil
 		type anchor struct {
 			stamp int64
@@ -139,7 +153,10 @@ func assembleTurnActivity(
 			// navigation anchor, including when a resumed turn has no prompt.
 			var anchor TurnRow
 			if len(anchors) > 0 {
-				index := max(0, sort.Search(len(anchors), func(i int) bool { return anchors[i].stamp > window.start })-1)
+				index := sort.Search(len(anchors), func(i int) bool { return anchors[i].stamp >= window.start })
+				if index == len(anchors) || anchors[index].stamp > window.end {
+					index = max(0, index-1)
+				}
 				anchor = anchors[index].row
 			}
 			out.Activity = append(out.Activity, TurnActivity{
@@ -153,6 +170,20 @@ func assembleTurnActivity(
 		upper, hasUpper = windows[len(windows)-1].end, true
 		out.TotalDurationMs = max(out.TotalDurationMs, upper-lower)
 	} else {
+		type assistantEnd struct {
+			stamp      int64
+			hasToolUse bool
+		}
+		var assistantEnds []assistantEnd
+		for _, row := range turns {
+			if row.Role != "assistant" || row.IsSystem {
+				continue
+			}
+			if stamp, ok := timingTimestamp(row.Timestamp); ok {
+				assistantEnds = append(assistantEnds, assistantEnd{stamp, row.HasToolUse})
+			}
+		}
+		sort.SliceStable(assistantEnds, func(i, j int) bool { return assistantEnds[i].stamp < assistantEnds[j].stamp })
 		for i := range out.Activity {
 			start, end := starts[i], upper
 			if hasLower {
@@ -163,17 +194,9 @@ func assembleTurnActivity(
 			}
 			// A final assistant answer is the best archive-only endpoint. A tool
 			// request alone does not prove that a turn has finished.
-			var last *TurnRow
-			for j := range turns {
-				stamp, ok := timingTimestamp(turns[j].Timestamp)
-				if ok && stamp >= start && stamp <= end && turns[j].Role == "assistant" && !turns[j].IsSystem {
-					last = &turns[j]
-				}
-			}
-			if last != nil && !last.HasToolUse {
-				if stamp, ok := timingTimestamp(last.Timestamp); ok {
-					end = min(end, stamp)
-				}
+			index := sort.Search(len(assistantEnds), func(j int) bool { return assistantEnds[j].stamp > end }) - 1
+			if index >= 0 && assistantEnds[index].stamp >= start && !assistantEnds[index].hasToolUse {
+				end = assistantEnds[index].stamp
 			}
 			end = max(start, end)
 			out.Activity[i].DurationMs = end - start
@@ -182,7 +205,11 @@ func assembleTurnActivity(
 			out.ActiveDurationMs += end - start
 		}
 	}
-	out.IdleDurationMs = max(0, out.TotalDurationMs-out.ActiveDurationMs)
+	if hasLower && hasUpper {
+		out.TotalDurationMs = max(out.TotalDurationMs, upper-lower)
+	}
+	out.TotalDurationMs = max(out.TotalDurationMs, out.ActiveDurationMs, 0)
+	out.IdleDurationMs = out.TotalDurationMs - out.ActiveDurationMs
 	var measured []activityInterval
 	byCategory := map[string][]activityInterval{}
 	counts := map[string]int{}
@@ -210,7 +237,7 @@ func assembleTurnActivity(
 		measured = append(measured, clipped)
 		byCategory[call.Category] = append(byCategory[call.Category], clipped)
 	}
-	if source != nil && len(windows) > 0 {
+	if len(windows) > 0 {
 		measured = activityIntersections(measured, windows)
 		for category, spans := range byCategory {
 			byCategory[category] = activityIntersections(spans, windows)
@@ -219,7 +246,9 @@ func assembleTurnActivity(
 
 	out.ToolDurationMs = activityUnionMs(measured)
 	if len(windows) == 0 {
-		out.ActivityTotals.ToolMs = out.ToolDurationMs
+		out.ToolDurationMs = 0
+		measured = nil
+		byCategory = map[string][]activityInterval{}
 	}
 	for category, count := range counts {
 		out.ByCategory = append(out.ByCategory, CategoryTotal{
@@ -252,6 +281,12 @@ func assembleTurnActivity(
 }
 
 func activityMerge(intervals []activityInterval) []activityInterval {
+	return activityMergeIntervals(intervals, true)
+}
+
+// Distinct lifecycle turns may touch at one endpoint; preserve those rows while
+// union queries can coalesce touching intervals without changing the duration.
+func activityMergeIntervals(intervals []activityInterval, mergeTouching bool) []activityInterval {
 	intervals = slices.Clone(intervals)
 	sort.Slice(intervals, func(i, j int) bool { return intervals[i].start < intervals[j].start })
 	result := make([]activityInterval, 0, len(intervals))
@@ -259,7 +294,7 @@ func activityMerge(intervals []activityInterval) []activityInterval {
 		if interval.end < interval.start {
 			continue
 		}
-		if len(result) > 0 && interval.start <= result[len(result)-1].end {
+		if len(result) > 0 && (interval.start < result[len(result)-1].end || mergeTouching && interval.start == result[len(result)-1].end) {
 			result[len(result)-1].end = max(result[len(result)-1].end, interval.end)
 		} else {
 			result = append(result, interval)

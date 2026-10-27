@@ -13,6 +13,7 @@ export interface DbSessionTiming {
   activity_totals: DbActivityTotals;
   by_category: DbCategoryTotal[];
   idle_duration_ms?: number;
+  model_timing_available?: boolean;
   running: boolean;
   session_id: string;
   slowest_call: DbCallTiming | null;

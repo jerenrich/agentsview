@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 
 	"go.kenn.io/agentsview/internal/ctxio"
 
@@ -54,7 +55,34 @@ func ReadSessionTiming(ctx context.Context, source io.Reader, agent string) (*Se
 	out := &SessionTimingEvidence{}
 	starts := map[string]int64{}
 	calls := map[string]int64{}
-	var prompt, lastAssistant, lastTimestamp int64
+	ambiguousCalls := map[string]bool{}
+	var lastActivity int64
+	closeOpenTurns := func() {
+		for id, start := range starts {
+			out.Turns = append(out.Turns, TimingInterval{start, max(start, lastActivity)})
+			delete(starts, id)
+		}
+	}
+	request := func(id string, stamp int64) {
+		// gjson strings can reference a whole JSON record. Clone IDs that
+		// outlive this iteration so a small key cannot pin a tool body.
+		id = strings.Clone(id)
+		if id == "" {
+			return
+		}
+		if previous, exists := calls[id]; exists && previous != stamp {
+			ambiguousCalls[id] = true
+		}
+		calls[id] = stamp
+	}
+	result := func(id string, stamp int64) {
+		if start, exists := calls[id]; id != "" && exists && !ambiguousCalls[id] && stamp >= start {
+			out.Calls = append(out.Calls, TimingCall{strings.Clone(id), TimingInterval{start, stamp}})
+		}
+		delete(calls, id)
+		delete(ambiguousCalls, id)
+	}
+	var prompt, lastAssistant int64
 	closeClaude := func() {
 		if prompt > 0 && lastAssistant >= prompt {
 			out.Turns = append(out.Turns, TimingInterval{prompt, lastAssistant})
@@ -72,28 +100,46 @@ func ReadSessionTiming(ctx context.Context, source io.Reader, agent string) (*Se
 			continue
 		}
 		entry := gjson.ParseBytes(line)
+		if agent == string(AgentCodex) && entry.Get("type").Str == "session_meta" {
+			payload := entry.Get("payload")
+			if payload.Get("forked_from_id").Str != "" || payload.Get("source.subagent").Exists() {
+				return nil, ErrTimingSourceUnsupported
+			}
+			id := payload.Get("id").Str
+			if out.SourceID != "" && id != "" && out.SourceID != id {
+				return nil, ErrTimingSourceUnsupported
+			}
+			if id != "" {
+				out.SourceID = strings.Clone(id)
+			}
+			continue
+		}
 		ts := parseTimestamp(entry.Get("timestamp").Str)
 		if ts.IsZero() {
 			continue
 		}
 		stamp := ts.UnixMilli()
-		lastTimestamp = max(lastTimestamp, stamp)
 		if agent == string(AgentCodex) {
 			payload := entry.Get("payload")
 			switch entry.Get("type").Str {
-			case "session_meta":
-				if payload.Get("forked_from_id").Str != "" || payload.Get("source.subagent").Exists() {
-					return nil, ErrTimingSourceUnsupported
-				}
-				out.SourceID = payload.Get("id").Str
 			case "event_msg":
 				id := payload.Get("turn_id").Str
 				switch payload.Get("type").Str {
 				case "task_started":
 					if _, exists := starts[id]; id != "" && !exists {
-						starts[id] = stamp
+						// A resumed task cannot extend an abandoned predecessor
+						// across the idle gap, even when its completion is absent.
+						closeOpenTurns()
+						starts[strings.Clone(id)], lastActivity = stamp, stamp
 					}
 				case "task_complete", "turn_aborted":
+					// Older abort events can omit turn_id; a single active
+					// lifecycle is the only unambiguous target.
+					if id == "" && len(starts) == 1 {
+						for active := range starts {
+							id = active
+						}
+					}
 					if start, ok := starts[id]; ok && stamp >= start {
 						out.Turns = append(out.Turns, TimingInterval{start, stamp})
 						delete(starts, id)
@@ -110,25 +156,29 @@ func ReadSessionTiming(ctx context.Context, source io.Reader, agent string) (*Se
 				id := payload.Get("call_id").Str
 				switch payload.Get("type").Str {
 				case "function_call", "custom_tool_call":
-					if id != "" {
-						calls[id] = stamp
-					}
+					request(id, stamp)
 				case "function_call_output", "custom_tool_call_output":
-					if start, ok := calls[id]; ok && stamp >= start {
-						out.Calls = append(out.Calls, TimingCall{id, TimingInterval{start, stamp}})
-						delete(calls, id)
-					}
+					result(id, stamp)
+				}
+			}
+			if len(starts) > 0 {
+				kind := payload.Get("type").Str
+				responseActivity := entry.Get("type").Str == "response_item" && payload.Get("role").Str != "user" && payload.Get("role").Str != "developer" && payload.Get("role").Str != "system"
+				eventActivity := entry.Get("type").Str == "event_msg" && kind != "task_started" && kind != "user_message" && kind != "thread_settings_applied"
+				_, belongs := starts[payload.Get("turn_id").Str]
+				if (payload.Get("turn_id").Str == "" || belongs) && (responseActivity || eventActivity) {
+					lastActivity = max(lastActivity, stamp)
 				}
 			}
 		} else {
-			if entry.Get("isSidechain").Bool() {
+			if entry.Get("isSidechain").Bool() || isHiddenClaudeMeta(entry.Raw) {
 				continue
 			}
 			if id := entry.Get("sessionId").Str; id != "" {
 				if out.SourceID != "" && out.SourceID != id {
 					return nil, ErrTimingSourceUnsupported
 				}
-				out.SourceID = id
+				out.SourceID = strings.Clone(id)
 			}
 			kind := entry.Get("type").Str
 			if kind != "user" && kind != "assistant" {
@@ -140,14 +190,13 @@ func ReadSessionTiming(ctx context.Context, source io.Reader, agent string) (*Se
 				switch block.Get("type").Str {
 				case "tool_use":
 					if kind == "assistant" {
-						calls[block.Get("id").Str] = stamp
+						request(block.Get("id").Str, stamp)
 					}
 				case "tool_result":
 					isResult = true
 					id := block.Get("tool_use_id").Str
-					if start, ok := calls[id]; kind == "user" && ok && stamp >= start {
-						out.Calls = append(out.Calls, TimingCall{id, TimingInterval{start, stamp}})
-						delete(calls, id)
+					if kind == "user" {
+						result(id, stamp)
 					}
 				}
 				return true
@@ -180,13 +229,8 @@ func ReadSessionTiming(ctx context.Context, source io.Reader, agent string) (*Se
 	if agent == string(AgentClaude) {
 		closeClaude()
 	} else {
-		// An unfinished turn stops at the observed snapshot, never at now:
-		// old interrupted transcripts must not accumulate days of unknown time.
-		for _, start := range starts {
-			if lastTimestamp >= start {
-				out.Turns = append(out.Turns, TimingInterval{start, lastTimestamp})
-			}
-		}
+		// Stop at observed activity, never wall time or a later prompt.
+		closeOpenTurns()
 	}
 	return out, nil
 }

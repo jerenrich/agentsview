@@ -2951,5 +2951,9 @@
   "status_bar_codex_cloud_live_attention": "Codex Cloud: live tokens need attention",
   "status_bar_codex_cloud_oldest_failure": "Oldest failure: {time}",
   "status_bar_codex_cloud_last_success": "Last successful sync: {time}",
-  "status_bar_codex_cloud_homes": "Codex homes: {homes}"
+  "status_bar_codex_cloud_homes": "Codex homes: {homes}",
+  "call_row_duration_execution": "Recorded execution",
+  "call_row_duration_caller_wait": "Request-to-result waiting, including dispatch and approvals",
+  "call_row_duration_subagent": "Linked subagent lifetime",
+  "session_vitals_activity_archive_hint": "Active windows are estimated from archived messages. Missing completion records can include idle time."
 }

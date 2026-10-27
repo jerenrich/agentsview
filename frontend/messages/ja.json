@@ -2932,5 +2932,9 @@
   "status_bar_codex_cloud_live_attention": "Codex Cloud: ライブトークンの確認が必要です",
   "status_bar_codex_cloud_oldest_failure": "最も古い失敗: {time}",
   "status_bar_codex_cloud_last_success": "最後に成功した同期: {time}",
-  "status_bar_codex_cloud_homes": "Codex ホーム: {homes}"
+  "status_bar_codex_cloud_homes": "Codex ホーム: {homes}",
+  "call_row_duration_execution": "記録された実行時間",
+  "call_row_duration_caller_wait": "送信と承認を含む、リクエストから結果までの待機時間",
+  "call_row_duration_subagent": "リンクされたサブエージェントの稼働時間",
+  "session_vitals_activity_archive_hint": "アクティブ期間は保存されたメッセージから推定されます。完了記録がない場合、待機時間が含まれることがあります。"
 }

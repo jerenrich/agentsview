@@ -145,7 +145,9 @@ evidence; they do not establish whether a tool helped the task.
   activity interval ending at its timestamp. Matching `tool_use` and
   `tool_result` IDs supply caller waiting intervals. User prompts through the
   final assistant timestamp conservatively bound active turns. Sidechain
-  records are excluded; absent duration fields remain unattributed.
+  records and hidden `isMeta` entries are excluded using the provider parser
+  rule; channel-origin user messages remain prompts. Absent duration fields
+  remain unattributed. Reverified against hidden-metadata and channel fixtures.
 
 
 - **Channel messages (2026-10-23):** Reverified against the synthetic Claude
@@ -606,8 +608,12 @@ fixtures retain this field; missing identities remain source-local.
   `started_at_ms` and `completed_at_ms` model intervals. Matching response-item
   `call_id` request/output pairs measure caller waiting, not execution. Shared
   bounded streaming decompression reads Codex `.jsonl.zst` logs. Open turns stop
-  at the snapshot's last observed timestamp. Forked or subagent sources fall
-  back to archive evidence.
+  at the last observed assistant/tool activity, before a new task starts. A
+  missing abort ID closes only the single unambiguous active turn. Overlapping
+  requests that reuse an ID and ambiguous archive matches remain unmeasured.
+  Metadata identity is validated even without an envelope timestamp. Forked or
+  subagent sources fall back to archive evidence. Reverified with resumed,
+  missing-completion, reused-ID, and identity-conflict fixtures.
 
 - **Execution timing (checked 2026-10-27):** Codex's
   [`ItemCompletedEvent`](https://github.com/openai/codex/blob/2cab11ca40aad193382348a7bda46da2fc47596a/codex-rs/protocol/src/protocol.rs#L2154-L2165)

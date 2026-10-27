@@ -2863,5 +2863,9 @@
   "status_bar_codex_cloud_live_attention": "Codex Cloud: 실시간 토큰 확인 필요",
   "status_bar_codex_cloud_oldest_failure": "가장 오래된 실패: {time}",
   "status_bar_codex_cloud_last_success": "마지막 동기화 성공: {time}",
-  "status_bar_codex_cloud_homes": "Codex 홈: {homes}"
+  "status_bar_codex_cloud_homes": "Codex 홈: {homes}",
+  "call_row_duration_execution": "기록된 실행 시간",
+  "call_row_duration_caller_wait": "전달 및 승인을 포함한 요청부터 결과까지의 대기 시간",
+  "call_row_duration_subagent": "연결된 하위 에이전트의 활동 시간",
+  "session_vitals_activity_archive_hint": "활동 구간은 보관된 메시지로 추정합니다. 완료 기록이 없으면 유휴 시간이 포함될 수 있습니다."
 }

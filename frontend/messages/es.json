@@ -2975,5 +2975,9 @@
   "status_bar_codex_cloud_live_attention": "Codex Cloud: los tokens en vivo requieren atención",
   "status_bar_codex_cloud_oldest_failure": "Fallo más antiguo: {time}",
   "status_bar_codex_cloud_last_success": "Última sincronización correcta: {time}",
-  "status_bar_codex_cloud_homes": "Carpetas de Codex: {homes}"
+  "status_bar_codex_cloud_homes": "Carpetas de Codex: {homes}",
+  "call_row_duration_execution": "Ejecución registrada",
+  "call_row_duration_caller_wait": "Espera entre solicitud y resultado, incluido el envío y las aprobaciones",
+  "call_row_duration_subagent": "Duración del subagente vinculado",
+  "session_vitals_activity_archive_hint": "Los períodos activos se estiman a partir de mensajes archivados. Si faltan registros de finalización, pueden incluir tiempo de inactividad."
 }

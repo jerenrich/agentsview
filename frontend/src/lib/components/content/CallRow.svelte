@@ -44,6 +44,15 @@
     return call.duration_ms != null ? formatDuration(call.duration_ms) : m.shared_unknown();
   });
 
+  let durationTitle = $derived.by(() => {
+    switch (call.duration_source) {
+      case "execution": return m.call_row_duration_execution();
+      case "caller_wait": return m.call_row_duration_caller_wait();
+      case "subagent": return m.call_row_duration_subagent();
+      default: return undefined;
+    }
+  });
+
   function handleChevronClick(e: MouseEvent) {
     e.stopPropagation();
     onChevronClick?.();
@@ -92,6 +101,7 @@
   </span>
   <span
     class="cd"
+    title={durationTitle}
     class:slow={isSlow}
     class:live={isLiveRow}
     class:muted={!isSlow && !isLiveRow}

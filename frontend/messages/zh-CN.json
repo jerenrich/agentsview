@@ -2857,5 +2857,9 @@
   "status_bar_codex_cloud_live_attention": "Codex Cloud：实时令牌需要处理",
   "status_bar_codex_cloud_oldest_failure": "最早的失败：{time}",
   "status_bar_codex_cloud_last_success": "上次成功同步：{time}",
-  "status_bar_codex_cloud_homes": "Codex 主目录：{homes}"
+  "status_bar_codex_cloud_homes": "Codex 主目录：{homes}",
+  "call_row_duration_execution": "记录的执行时间",
+  "call_row_duration_caller_wait": "从请求到结果的等待时间，包括分发和审批",
+  "call_row_duration_subagent": "关联子代理的活动时长",
+  "session_vitals_activity_archive_hint": "活动时段根据归档消息估算。缺少完成记录时可能包含空闲时间。"
 }
