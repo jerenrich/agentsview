@@ -140,6 +140,16 @@ evidence; they do not establish whether a tool helped the task.
 
 ## Claude Code (`claude`)
 
+- **Shared-file timing (2026-10-27):** Reverified with in-file fork and
+  background-fork lineage fixtures. When the DAG parse splits a file into
+  several sessions, or lineage drops a replayed parent prefix, the file's
+  records belong to more than one session. Every result is marked
+  `SourceTimingShared` and stores a timing rejection, because the timing reader
+  scans the whole file. Retry branches inside one session keep whole-file
+  timing. `subagents/agent-*.jsonl` transcripts are all sidechain records and
+  are rejected by path. A final prompt with no response is an open zero-length
+  turn, so a live session shows it as running.
+
 - **Timing retention (2026-10-27):** Copied-session ingestion and source-deletion
   checks reverify the fields below. Local SQLite ingestion retains content-free
   timing evidence and coverage. Source turn boundaries remain conservative;
@@ -623,6 +633,11 @@ fixtures retain this field; missing identities remain source-local.
   `internal/parser/cowork_paths.go`, and `internal/parser/cowork_provider.go`.
 
 ## Codex (`codex`)
+
+- **Oversized records (2026-10-27):** Reverified against the provider line
+  reader: records longer than 64 MiB are skipped, not fatal. The timing reader
+  now skips them the same way while hashing every byte, so one oversized record
+  no longer discards a rollout's timing or forces a rescan on every append.
 
 - **Timing retention (2026-10-27):** The copied-rollout ingestion and deletion
   regression checks reverify the activity fields below. Local SQLite ingestion

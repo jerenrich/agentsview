@@ -38,7 +38,7 @@ func (db *DB) ReplaceSessionKeepingTrashedCopy(
 	if src.DeletedAt != nil {
 		return "", ErrSessionTrashed
 	}
-	retainedEvidence, err := db.storedTimingEvidence(ctx, src)
+	retainedEvidence, _, err := db.storedTimingEvidence(ctx, src)
 	if err != nil {
 		return "", err
 	}

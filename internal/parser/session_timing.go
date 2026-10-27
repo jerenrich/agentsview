@@ -2,7 +2,6 @@ package parser
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -33,6 +32,9 @@ type SessionTimingEvidence struct {
 	Turns    []TimingInterval
 	Model    []TimingInterval
 	Calls    []TimingCall
+	// Open marks the final Turns entry as an unfinished EOF turn. Its end is
+	// the last observed activity, not a recorded completion.
+	Open bool `json:",omitzero"`
 }
 
 var ErrTimingSourceUnsupported = errors.New("unsupported timing source")
@@ -123,16 +125,21 @@ func (s *SessionTimingState) closeClaude() {
 }
 
 // Snapshot returns evidence without mutating unfinished turns or tool requests.
+// An unfinished turn is appended last and flagged Open, including a Claude
+// prompt that has no recorded response yet.
 func (s *SessionTimingState) Snapshot(agent string) *SessionTimingEvidence {
 	out := s.Evidence
 	out.Turns = slices.Clone(out.Turns)
+	out.Open = false
 	if agent == string(AgentClaude) {
-		if s.Prompt > 0 && s.LastClaudeActivity >= s.Prompt {
-			out.Turns = append(out.Turns, TimingInterval{s.Prompt, s.LastClaudeActivity})
+		if s.Prompt > 0 {
+			out.Turns = append(out.Turns, TimingInterval{s.Prompt, max(s.Prompt, s.LastClaudeActivity)})
+			out.Open = true
 		}
 	} else {
 		for _, start := range s.Starts {
 			out.Turns = append(out.Turns, TimingInterval{start, max(start, s.LastActivity)})
+			out.Open = true
 		}
 	}
 	return &out
@@ -163,9 +170,12 @@ func (s *SessionTimingState) Valid() bool {
 }
 
 // ReadSessionTimingChunk resumes from a complete-line checkpoint. Observe sees
-// raw bytes transiently, with complete=false for a final unterminated record;
-// callers may hash them, but must not retain them in the checkpoint. The returned
-// state excludes that partial record while the evidence preserves legacy EOF
+// every raw byte transiently and in order; complete is true only for bytes that
+// end a newline-terminated record. Earlier pieces of an oversized record and a
+// final unterminated record arrive with complete=false. Callers may hash them,
+// but must not retain them in the checkpoint. Records longer than the provider
+// line limit are skipped like normal ingestion skips them. The returned state
+// excludes a partial final record while the evidence preserves legacy EOF
 // parsing. CompleteBytes is relative to this chunk's beginning.
 func ReadSessionTimingChunk(ctx context.Context, source io.Reader, agent, path string, previous *SessionTimingState, observe func([]byte, bool) error) (*SessionTimingEvidence, *SessionTimingState, int64, error) {
 	if agent != string(AgentCodex) && agent != string(AgentClaude) {
@@ -176,54 +186,99 @@ func ReadSessionTimingChunk(ctx context.Context, source io.Reader, agent, path s
 	}
 	state := previous.Clone()
 	bounded := &io.LimitedReader{R: ctxio.Reader{Context: ctx, Reader: source}, N: (256 << 20) + 1}
-	scanner := bufio.NewScanner(bounded)
-	scanner.Buffer(make([]byte, initialScanBufSize), maxLineSize)
-	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
-		if i := bytes.IndexByte(data, '\n'); i >= 0 {
-			return i + 1, data[:i+1], nil
+	reader := bufio.NewReaderSize(bounded, initialScanBufSize)
+	emit := func(p []byte, complete bool) error {
+		if observe == nil || len(p) == 0 {
+			return nil
 		}
-		if atEOF && len(data) > 0 {
-			return len(data), data, nil
-		}
-		return 0, nil, nil
-	})
-	var completeBytes int64
-	var preview *SessionTimingState
-	for scanner.Scan() {
+		return observe(p, complete)
+	}
+	var completeBytes, pending int64
+	var line []byte
+	oversized := false
+	for {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, 0, err
 		}
-		line := scanner.Bytes()
-		complete := len(line) > 0 && line[len(line)-1] == '\n'
-		if observe != nil {
-			if err := observe(line, complete); err != nil {
-				return nil, nil, 0, err
+		chunk, readErr := reader.ReadSlice('\n')
+		if len(chunk) > 0 {
+			terminated := chunk[len(chunk)-1] == '\n'
+			pending += int64(len(chunk))
+			switch {
+			case oversized:
+				if err := emit(chunk, terminated); err != nil {
+					return nil, nil, 0, err
+				}
+			case len(line) == 0 && terminated:
+				// Common case: consume the reader's buffer without copying it.
+				// One buffered slice is always shorter than the line limit.
+				if err := emit(chunk, true); err != nil {
+					return nil, nil, 0, err
+				}
+				if err := state.consume(chunk, agent, path); err != nil {
+					return nil, nil, 0, err
+				}
+			default:
+				line = append(line, chunk...)
+				if timingLineContentLen(line) > maxLineSize {
+					oversized = true
+					if err := emit(line, terminated); err != nil {
+						return nil, nil, 0, err
+					}
+					line = line[:0]
+				} else if terminated {
+					if err := emit(line, true); err != nil {
+						return nil, nil, 0, err
+					}
+					if err := state.consume(line, agent, path); err != nil {
+						return nil, nil, 0, err
+					}
+					line = line[:0]
+				}
+			}
+			if terminated {
+				completeBytes += pending
+				pending, oversized = 0, false
 			}
 		}
-		target := state
-		if !complete {
-			preview = state.Clone()
-			target = preview
-		} else {
-			completeBytes += int64(len(line))
+		if readErr == nil || errors.Is(readErr, bufio.ErrBufferFull) {
+			continue
 		}
-		if err := target.consume(line, agent, path); err != nil {
-			return nil, nil, 0, err
+		if errors.Is(readErr, io.EOF) {
+			break
 		}
+		return nil, nil, 0, readErr
 	}
 	if bounded.N == 0 {
 		return nil, nil, 0, ErrTimingSourceUnsupported
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, nil, 0, err
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, nil, 0, err
 	}
-	if preview != nil {
+	if len(line) > 0 {
+		if err := emit(line, false); err != nil {
+			return nil, nil, 0, err
+		}
+		preview := state.Clone()
+		if err := preview.consume(line, agent, path); err != nil {
+			return nil, nil, 0, err
+		}
 		return preview.Snapshot(agent), state, completeBytes, nil
 	}
 	return state.Snapshot(agent), state, completeBytes, nil
+}
+
+// timingLineContentLen measures a record the way lineReader does, excluding
+// its line terminator.
+func timingLineContentLen(line []byte) int {
+	n := len(line)
+	if n > 0 && line[n-1] == '\n' {
+		n--
+		if n > 0 && line[n-1] == '\r' {
+			n--
+		}
+	}
+	return n
 }
 
 func (s *SessionTimingState) consume(line []byte, agent, path string) error {

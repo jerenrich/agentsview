@@ -64,22 +64,30 @@ func TestReadSessionTimingClaudeToolResultBoundsInterruptedTurn(t *testing.T) {
 	next := `{"timestamp":"2026-04-26T11:00:00Z","type":"user","sessionId":"timing","message":{"content":"next"}}`
 	earlierAssistant := `{"timestamp":"2026-04-26T10:00:20Z","type":"assistant","sessionId":"timing","message":{"content":"working"}}`
 	for _, tc := range []struct {
-		name      string
-		tail      []string
-		duration  int64
-		callCount int
+		name       string
+		tail       []string
+		duration   int64
+		callCount  int
+		nextPrompt bool
 	}{
-		{"completed at EOF", []string{result}, 30000, 1},
-		{"completed before next prompt", []string{result, next}, 30000, 1},
-		{"pending at EOF", nil, 2000, 0},
-		{"pending before next prompt", []string{next}, 2000, 0},
-		{"later assistant has earlier timestamp", []string{result, earlierAssistant}, 30000, 1},
+		{"completed at EOF", []string{result}, 30000, 1, false},
+		{"completed before next prompt", []string{result, next}, 30000, 1, true},
+		{"pending at EOF", nil, 2000, 0, false},
+		{"pending before next prompt", []string{next}, 2000, 0, true},
+		{"later assistant has earlier timestamp", []string{result, earlierAssistant}, 30000, 1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			lines := append(append([]string(nil), prefix...), tc.tail...)
 			evidence, err := ReadSessionTiming(t.Context(), strings.NewReader(strings.Join(lines, "\n")), "claude")
 			require.NoError(t, err)
-			require.Len(t, evidence.Turns, 1)
+			assert.True(t, evidence.Open, "the final Claude prompt has no recorded completion")
+			if tc.nextPrompt {
+				// The unanswered prompt is an open turn that has not used time yet.
+				require.Len(t, evidence.Turns, 2)
+				assert.Equal(t, TimingInterval{1777201200000, 1777201200000}, evidence.Turns[1])
+			} else {
+				require.Len(t, evidence.Turns, 1)
+			}
 			assert.Equal(t, tc.duration, evidence.Turns[0].End-evidence.Turns[0].Start)
 			require.Len(t, evidence.Calls, tc.callCount)
 			if tc.callCount > 0 {
@@ -139,7 +147,7 @@ func TestReadSessionTimingRejectsReplayAndCancellation(t *testing.T) {
 	} {
 		source := `{"timestamp":"2026-04-26T10:00:00Z","type":"session_meta","payload":` + metadata + `}`
 		_, err := ReadSessionTiming(t.Context(), strings.NewReader(source), "codex")
-		assert.ErrorIs(t, err, ErrTimingSourceUnsupported)
+		require.ErrorIs(t, err, ErrTimingSourceUnsupported)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -267,6 +275,49 @@ func TestReadSessionTimingContinuationIdentity(t *testing.T) {
 			evidence, err := ReadSessionTiming(t.Context(), strings.NewReader(source), "codex", path)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, evidence.SourceID)
+		})
+	}
+}
+
+func TestReadSessionTimingSkipsOversizedRecordsLikeIngestion(t *testing.T) {
+	lines := []string{
+		`{"timestamp":"2026-04-26T10:00:00Z","type":"session_meta","payload":{"id":"oversized"}}`,
+		`{"timestamp":"2026-04-26T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}`,
+		`{"timestamp":"2026-04-26T10:00:01Z","type":"response_item","payload":{"type":"function_call","call_id":"call"}}`,
+		`{"timestamp":"2026-04-26T10:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call"}}`,
+		`{"timestamp":"2026-04-26T10:00:05Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}`,
+	}
+	without := strings.Join(lines, "\n") + "\n"
+	want, err := ReadSessionTiming(t.Context(), strings.NewReader(without), "codex")
+	require.NoError(t, err)
+	huge := `{"timestamp":"2026-04-26T10:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":"` +
+		strings.Repeat("x", maxLineSize) + `"}}`
+	for _, tc := range []struct {
+		name   string
+		source string
+	}{
+		{"terminated", strings.Join(append(lines[:3:3], append([]string{huge}, lines[3:]...)...), "\n") + "\n"},
+		{"unterminated at EOF", without + huge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var observed int
+			var pieces []bool
+			got, state, complete, err := ReadSessionTimingChunk(t.Context(), strings.NewReader(tc.source), "codex", "", nil, func(p []byte, done bool) error {
+				require.Equal(t, tc.source[observed:observed+len(p)], string(p), "bytes must be observed in source order")
+				observed += len(p)
+				pieces = append(pieces, done)
+				return nil
+			})
+			require.NoError(t, err, "an oversized record must not discard the session's timing")
+			assert.Equal(t, len(tc.source), observed)
+			assert.Equal(t, want, got)
+			require.NotNil(t, state)
+			if tc.name == "terminated" {
+				assert.Equal(t, int64(len(tc.source)), complete)
+			} else {
+				assert.Equal(t, int64(len(without)), complete, "the unterminated record is reread after resume")
+				assert.False(t, pieces[len(pieces)-1])
+			}
 		})
 	}
 }

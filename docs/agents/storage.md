@@ -266,7 +266,28 @@ prefix, validate its SHA-256 when available, and share bounded scans and caches.
 Reads prefer evidence whose version, provider, native identity, size, modification
 time, and hash match the imported session. They do not require the source to
 still exist. Unreadable captures preserve existing records; changed source
-bindings cannot reuse them. Orphan, trash, and replacement copies retain evidence.
+bindings cannot reuse them.
+
+A row with an empty `evidence` payload is a saved rejection. It records that
+the bound source cannot supply this session's timing, and reads then skip the
+source fallback. Writers save one only when the cause is deterministic and
+survives appends:
+
+- the Claude parser marks the file as shared (`SourceTimingShared`): it holds
+  in-file DAG forks or a replayed parent prefix, so the main session and its
+  forks would otherwise each receive whole-file timing;
+- a Claude `subagents/agent-*.jsonl` transcript, whose records are all
+  sidechains;
+- the timing reader rejects the imported bytes, for example a forked or
+  subagent Codex rollout, conflicting source identities, or the event limit,
+  after a separate hash proves those bytes match the import;
+- a source or encoded evidence past its size limit.
+
+Incremental appends carry a saved rejection to the new binding without reading
+the source. Full parses always decide again. An incremental Claude append with
+no saved row skips capture, because only a full parse can show the file is not
+shared. Without a saved decision, reads skip Claude sources for forks,
+continuations, subagent transcripts, and parents of a same-file fork child. Orphan, trash, and replacement copies retain evidence.
 Data version 152 reparses local Codex and Claude sources in place to populate
 activity and execution timing. It includes Codex continuation pages using the
 provider's exact filename/header identity rules and Claude observed tool-result
@@ -303,7 +324,12 @@ archive fallback and its estimated-boundary label.
 
 Plaintext Codex and Claude JSONL captures resume from
 `session_timing_checkpoints`. Each row contains a versioned timing reducer,
-complete-line byte offset, source binding, and resumable SHA-256 state. Evidence
+complete-line byte offset, source binding, and resumable SHA-256 state. Since
+checkpoint version 2, the cursor omits closed evidence and stores only counts.
+Loading rebuilds the closed prefix from the evidence row committed in the same
+transaction, so each append rewrites the evidence once instead of twice. The
+evidence row still holds the full snapshot, so its write size grows with the
+session. Evidence
 and its checkpoint commit in the same transaction; full imports publish them
 only after normalized content succeeds. Checkpoints are disposable optimization
 state and are not copied during orphan/trash preservation rebuilds. The archived
@@ -317,7 +343,10 @@ truncation, moved paths, incompatible codecs, and invalid checkpoints fall back
 to a bounded cold capture. A missing checkpoint
 warms on the next successful capture; unchanged archives need no parser resync.
 Incomplete JSONL suffixes are reread, and EOF previews never close unfinished
-turns or tool requests in the saved reducer. SHA state is saved only at complete
+turns or tool requests in the saved reducer. Evidence flags the unfinished EOF
+turn as `Open`, so a running session shows it as in progress. Records longer
+than the provider's 64 MiB line limit are hashed but skipped, as normal
+ingestion skips them, instead of discarding the session's timing. SHA state is saved only at complete
 64-byte blocks, so no transcript bytes are retained in its buffer; resuming
 rereads at most 63 bytes before the JSONL boundary to reconstruct that buffer.
 

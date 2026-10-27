@@ -37,7 +37,7 @@ func (s *Store) GetSessionTiming(
 	if err != nil {
 		return nil, err
 	}
-	return db.AssembleTimingContext(ctx, sess, turnRows, callRows, time.Now().UTC())
+	return db.AssembleTimingContext(ctx, sess, turnRows, callRows, time.Now().UTC(), s.GetChildSessions)
 }
 
 func (s *Store) queryTurnRows(

@@ -509,6 +509,10 @@ func claudeParseFile(
 		results[0].Session.RelationshipType = RelContinuation
 	}
 
+	// Timing evidence is read from the whole file. It belongs to a single
+	// session only when no branch or replayed prefix is owned elsewhere.
+	sharedTiming := len(results) > 1 || lineage != nil
+
 	// Classify termination status for each result. All forks
 	// from a single file share lastLineFailed because a
 	// truncated tail affects every branch. The stop_reason is
@@ -529,6 +533,7 @@ func claudeParseFile(
 			lastLineFailed,
 		)
 		results[i].Session.claudeRenameSeen = renameSeen
+		results[i].Session.SourceTimingShared = sharedTiming
 	}
 
 	// Drop content-free /usage probe sessions (e.g. CodexBar's

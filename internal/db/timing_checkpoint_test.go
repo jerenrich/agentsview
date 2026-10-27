@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -19,7 +20,7 @@ import (
 
 func writeTimingSnapshot(t *testing.T, s Session, content []byte) Session {
 	t.Helper()
-	require.NoError(t, os.WriteFile(*s.FilePath, content, 0600))
+	require.NoError(t, os.WriteFile(*s.FilePath, content, 0o600))
 	info, err := os.Stat(*s.FilePath)
 	require.NoError(t, err)
 	sum := sha256.Sum256(content)
@@ -156,7 +157,7 @@ func TestTimingCheckpointRollsBackWithEvidence(t *testing.T) {
 	require.NoError(t, d.UpsertSession(t.Context(), s))
 	_, err = d.getWriter().Exec(t.Context(), `CREATE TRIGGER fail_timing_checkpoint BEFORE INSERT ON session_timing_checkpoints BEGIN SELECT RAISE(ABORT,'injected checkpoint failure'); END`)
 	require.NoError(t, err)
-	newer := append(full, []byte(`{"opaque":"new bytes"}`+"\n")...)
+	newer := slices.Concat(full, []byte(`{"opaque":"new bytes"}`+"\n"))
 	changed := writeTimingSnapshot(t, s, newer)
 	require.ErrorContains(t, d.UpsertSession(t.Context(), changed), "injected checkpoint failure")
 	var evidenceHash, checkpointHash, sessionHash string
@@ -169,7 +170,7 @@ func TestTimingCheckpointRollsBackWithEvidence(t *testing.T) {
 }
 
 func TestTimingHashCheckpointDropsPartialBlockBytes(t *testing.T) {
-	for size := 0; size < 256; size++ {
+	for size := range 256 {
 		data := []byte(strings.Repeat("private-buffer-data-", 14))[:size]
 		h, err := newAlignedTimingHash(nil)
 		require.NoError(t, err)
@@ -196,7 +197,7 @@ func TestTimingCheckpointWorkDoesNotGrowWithArchive(t *testing.T) {
 			require.NoError(t, d.UpsertSession(t.Context(), s))
 			tx, err := d.getWriter().Begin(t.Context())
 			require.NoError(t, err)
-			for i := 0; i < extra; i++ {
+			for i := range extra {
 				_, err := tx.ExecContext(t.Context(), "INSERT INTO sessions(id,project,machine,agent) VALUES(?,?,?,?)", fmt.Sprintf("unrelated-%d", i), "project", "local", "codex")
 				require.NoError(t, err)
 			}
@@ -209,7 +210,7 @@ func TestTimingCheckpointWorkDoesNotGrowWithArchive(t *testing.T) {
 			prepared := requireTimingCaptureMatchesFull(t, d, s, source)
 			assert.True(t, prepared.TimingCapture.Resumed)
 			assert.LessOrEqual(t, prepared.TimingCapture.SourceBytesRead, int64(len(tail)+63))
-			plan, err := d.getReader().QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+loadTimingCheckpointSQL, s.ID, s.Agent, timingSourceID(&s), timingEvidenceVersion, timingCheckpointVersion, *s.FilePath, *s.FileSize, maxArchivedTimingBytes)
+			plan, err := d.getReader().QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+loadTimingCheckpointSQL, s.ID, s.Agent, timingSourceID(&s), timingEvidenceVersion, timingCheckpointVersion, *s.FilePath, *s.FileSize, maxArchivedTimingBytes, maxArchivedTimingBytes)
 			require.NoError(t, err)
 			defer plan.Close()
 			for plan.Next() {
@@ -243,7 +244,7 @@ func TestTimingCheckpointFiltersInvalidRowsBeforePayloadRead(t *testing.T) {
 			require.NoError(t, d.UpsertSession(t.Context(), s))
 			_, err := d.getWriter().Exec(t.Context(), tc.mutate)
 			require.NoError(t, err)
-			rows, err := d.getReader().QueryContext(t.Context(), loadTimingCheckpointSQL, s.ID, s.Agent, timingSourceID(&s), timingEvidenceVersion, timingCheckpointVersion, *s.FilePath, *s.FileSize+1024, tc.limit)
+			rows, err := d.getReader().QueryContext(t.Context(), loadTimingCheckpointSQL, s.ID, s.Agent, timingSourceID(&s), timingEvidenceVersion, timingCheckpointVersion, *s.FilePath, *s.FileSize+1024, tc.limit, maxArchivedTimingBytes)
 			require.NoError(t, err)
 			defer rows.Close()
 			assert.False(t, rows.Next(), "invalid metadata must not reach the driver as a result row")
@@ -322,7 +323,7 @@ func TestTimingCheckpointIgnoresStalePreDowngradeCursor(t *testing.T) {
 	require.NoError(t, d.UpsertSession(t.Context(), s))
 	// A pre-checkpoint binary updates evidence and session metadata without
 	// touching the optional cursor table. Its stale row must not be resumed.
-	newer := append(source, []byte(`{"opaque":"written by older binary"}`+"\n")...)
+	newer := slices.Concat(source, []byte(`{"opaque":"written by older binary"}`+"\n"))
 	s = writeTimingSnapshot(t, s, newer)
 	r, _ := scanTimingCapture(t.Context(), &s, nil)
 	require.NotNil(t, r)
@@ -340,4 +341,23 @@ func TestTimingCheckpointIgnoresStalePreDowngradeCursor(t *testing.T) {
 	err = d.getReader().QueryRowContext(t.Context(), "SELECT file_hash FROM session_timing_checkpoints WHERE session_id=?", s.ID).Scan(&hash)
 	require.NoError(t, err)
 	assert.Equal(t, *s.FileHash, hash)
+}
+
+func TestTimingCaptureCheckpointResumesAfterOversizedPartialRecord(t *testing.T) {
+	d := testDB(t)
+	s := archivedTimingFixture(t, d)
+	base, err := os.ReadFile(*s.FilePath)
+	require.NoError(t, err)
+	// The record exceeds the provider line limit and is still being written.
+	partial := slices.Concat(base, []byte(`{"opaque":"`+strings.Repeat("x", 64<<20)))
+	s = writeTimingSnapshot(t, s, partial)
+	first := requireTimingCaptureMatchesFull(t, d, s, partial)
+	require.NotNil(t, first.TimingCapture.Checkpoint)
+	assert.Equal(t, int64(len(base)), first.TimingCapture.Checkpoint.Offset, "resume starts at the oversized record")
+	require.NoError(t, d.UpsertSession(t.Context(), first))
+	finished := slices.Concat(partial, []byte(`"}`+"\n"+`{"opaque":"after"}`+"\n"))
+	s = writeTimingSnapshot(t, s, finished)
+	resumed := requireTimingCaptureMatchesFull(t, d, s, finished)
+	assert.True(t, resumed.TimingCapture.Resumed, "the saved hash must match the resume boundary")
+	assert.Equal(t, int64(len(finished)), resumed.TimingCapture.Checkpoint.Offset)
 }

@@ -1494,6 +1494,10 @@ type ParsedSession struct {
 	SourceVersion      string
 	GroupKey           string `json:"group_key,omitempty"`
 	KeepStoredGroupKey bool   `json:"keep_stored_group_key,omitempty"`
+	// SourceTimingShared marks a source file that also holds records owned by
+	// another session, such as in-file DAG forks or a replayed parent prefix.
+	// Whole-file activity timing must not be attributed to such a session.
+	SourceTimingShared bool `json:"source_timing_shared,omitempty"`
 	// TranscriptFidelity classifies how complete a stored transcript is
 	// relative to the agent's full session data: "full" when the
 	// high-resolution source was used, "summary" for a degraded/fallback

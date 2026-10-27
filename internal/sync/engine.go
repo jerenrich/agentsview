@@ -18834,6 +18834,11 @@ func (e *Engine) prepareSessionNormalizedContext(
 	if pw.sess.GenMetadataWithoutUsage {
 		e.anomalies.recordGenMetadataWithoutUsageSession(s.Agent)
 	}
+	if pw.sess.SourceTimingShared {
+		// The file also holds another session's records, so every writer
+		// stores a rejection instead of whole-file activity timing.
+		prepared.Session = db.ExcludeSessionTimingEvidence(prepared.Session)
+	}
 	return prepared, sessionWriteOK, ctx.Err()
 }
 

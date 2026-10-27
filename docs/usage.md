@@ -995,7 +995,11 @@ unmeasured. Readable sources without model intervals also show **Not measured**,
 rather than implying zero model work. The panel labels archive-derived activity
 windows as estimates: missing completion records can still include idle time. Individual call duration tooltips identify
 recorded execution, request-to-result waiting, or a linked subagent lifetime. Forked and subagent sources use that fallback to avoid mixing replayed
-parent activity into child sessions.
+parent activity into child sessions. This includes Claude transcripts that also
+hold an in-file fork or a replayed parent prefix: neither the main session nor
+the fork receives whole-file timing. In a live session, the newest unfinished
+turn keeps running until now, including a Claude prompt that has no response
+yet.
 
 Individual calls prefer explicit execution endpoints or a closed linked child;
 paired request/result latency supplies a duration when execution is unavailable.

@@ -7,6 +7,7 @@ import (
 	"encoding"
 	"encoding/hex"
 	"encoding/json/v2"
+	"errors"
 	"hash"
 	"io"
 	"os"
@@ -18,7 +19,18 @@ import (
 
 // Increment when the reducer semantics or encoded continuation state changes.
 // Evidence versioning is independent: invalid cursors can always be rebuilt.
-const timingCheckpointVersion = 1
+// Version 2 stops repeating closed evidence inside the cursor.
+const timingCheckpointVersion = 2
+
+// timingCursor is the stored reducer state without its closed evidence. The
+// counts select the closed prefix of the evidence row committed with it: EOF
+// previews and open turns only ever append after that prefix.
+type timingCursor struct {
+	State parser.SessionTimingState
+	Turns int
+	Model int
+	Calls int
+}
 
 // Checkpoints are disposable, local optimization state. Their hash state is
 // block-aligned: no partial SHA block containing transcript bytes is persisted.
@@ -72,18 +84,19 @@ func (h *alignedTimingHash) state() []byte {
 }
 
 func (h *alignedTimingHash) sum() string {
-	copy, _ := newAlignedTimingHash(h.state())
-	_, _ = copy.h.Write(h.tail[:h.n])
-	return hex.EncodeToString(copy.h.Sum(nil))
+	clone, _ := newAlignedTimingHash(h.state())
+	_, _ = clone.h.Write(h.tail[:h.n])
+	return hex.EncodeToString(clone.h.Sum(nil))
 }
 
-const loadTimingCheckpointSQL = `SELECT c.version,c.file_path,c.offset,c.hash_state,c.cursor,c.file_size
+const loadTimingCheckpointSQL = `SELECT c.version,c.file_path,c.offset,c.hash_state,c.cursor,c.file_size,e.evidence
  FROM session_timing_checkpoints c JOIN session_timing_evidence e ON e.session_id=c.session_id
  WHERE c.session_id=? AND c.agent=? AND c.source_id=? AND e.version=?
  AND e.agent=c.agent AND e.source_id=c.source_id AND e.file_size=c.file_size AND e.file_hash=c.file_hash
  AND c.version=? AND c.file_path=? AND c.file_size<=?
  AND c.offset>0 AND c.offset<=c.file_size
- AND length(CAST(c.cursor AS BLOB))<=? AND length(CAST(c.hash_state AS BLOB)) BETWEEN 1 AND 4096`
+ AND length(CAST(c.cursor AS BLOB))<=? AND length(CAST(c.hash_state AS BLOB)) BETWEEN 1 AND 4096
+ AND length(CAST(e.evidence AS BLOB)) BETWEEN 1 AND ?`
 
 func (db *DB) loadTimingCheckpoint(ctx context.Context, s *Session) *timingCaptureCheckpoint {
 	if s.FilePath == nil || s.FileSize == nil {
@@ -91,16 +104,31 @@ func (db *DB) loadTimingCheckpoint(ctx context.Context, s *Session) *timingCaptu
 	}
 	var version int
 	var cp timingCaptureCheckpoint
-	var cursor []byte
+	var cursor, payload []byte
 	var importedSize int64
 	// Filter incompatible and oversized rows in SQLite before the driver copies
-	// their payloads into Go memory. Cursor limits count bytes, not characters.
-	err := db.getReader().QueryRowContext(ctx, loadTimingCheckpointSQL, s.ID, s.Agent, timingSourceID(s), timingEvidenceVersion, timingCheckpointVersion, *s.FilePath, *s.FileSize, maxArchivedTimingBytes).Scan(&version, &cp.Path, &cp.Offset, &cp.HashState, &cursor, &importedSize)
-	if err != nil || version != timingCheckpointVersion || s.FilePath == nil || cp.Path != *s.FilePath || s.FileSize == nil || cp.Offset <= 0 || cp.Offset > *s.FileSize || importedSize > *s.FileSize || len(cursor) > maxArchivedTimingBytes || len(cp.HashState) > 4096 {
+	// their payloads into Go memory. Limits count bytes, not characters. A
+	// rejected evidence row has an empty payload and never resumes.
+	err := db.getReader().QueryRowContext(ctx, loadTimingCheckpointSQL, s.ID, s.Agent, timingSourceID(s), timingEvidenceVersion, timingCheckpointVersion, *s.FilePath, *s.FileSize, maxArchivedTimingBytes, maxArchivedTimingBytes).Scan(&version, &cp.Path, &cp.Offset, &cp.HashState, &cursor, &importedSize, &payload)
+	if err != nil || version != timingCheckpointVersion || s.FilePath == nil || cp.Path != *s.FilePath || s.FileSize == nil || cp.Offset <= 0 || cp.Offset > *s.FileSize || importedSize > *s.FileSize || len(cursor) > maxArchivedTimingBytes || len(payload) > maxArchivedTimingBytes || len(cp.HashState) > 4096 {
 		return nil
 	}
-	var state parser.SessionTimingState
-	if json.Unmarshal(cursor, &state) != nil || !state.Valid() || state.Evidence.SourceID != timingSourceID(s) {
+	var stored timingCursor
+	var evidence parser.SessionTimingEvidence
+	if json.Unmarshal(cursor, &stored) != nil || json.Unmarshal(payload, &evidence) != nil {
+		return nil
+	}
+	if stored.Turns < 0 || stored.Model < 0 || stored.Calls < 0 || stored.Turns > len(evidence.Turns) || stored.Model > len(evidence.Model) || stored.Calls > len(evidence.Calls) {
+		return nil
+	}
+	state := stored.State
+	state.Evidence = parser.SessionTimingEvidence{
+		SourceID: evidence.SourceID,
+		Turns:    evidence.Turns[:stored.Turns:stored.Turns],
+		Model:    evidence.Model[:stored.Model:stored.Model],
+		Calls:    evidence.Calls[:stored.Calls:stored.Calls],
+	}
+	if !state.Valid() || state.Evidence.SourceID != timingSourceID(s) {
 		return nil
 	}
 	cp.State = &state
@@ -120,6 +148,8 @@ func (r *timingCountingReader) Read(p []byte) (int, error) {
 
 // scanTimingCapture verifies the resumed digest against the canonical ingestion
 // hash. A rewritten committed prefix therefore cannot reuse stale reducer state.
+// A cold scan may return a Rejected record, but only for a failure that is
+// deterministic for the imported bytes and survives later appends.
 func scanTimingCapture(ctx context.Context, s *Session, prior *timingCaptureCheckpoint) (*timingEvidenceRecord, int64) {
 	if ctx.Err() != nil || s.FilePath == nil || !filepath.IsAbs(*s.FilePath) || s.FileSize == nil || *s.FileSize <= 0 {
 		return nil, 0
@@ -153,6 +183,10 @@ func scanTimingCapture(ctx context.Context, s *Session, prior *timingCaptureChec
 		offset, state, hashState = prior.Offset, prior.State, prior.HashState
 	}
 	if *s.FileSize-offset > maxTimingSourceBytes {
+		if prior == nil {
+			// Sources only grow, so a cold source past the bound stays there.
+			return rejectedTimingRecord(s), 0
+		}
 		return nil, 0
 	}
 	h, err := newAlignedTimingHash(hashState)
@@ -171,39 +205,72 @@ func scanTimingCapture(ctx context.Context, s *Session, prior *timingCaptureChec
 		}
 		h.Write(prefix[:offset-aligned])
 	}
+	// Save the hash at the last complete-line boundary: the start of the first
+	// piece of a record whose terminator has not been observed yet.
 	var savedHash []byte
-	observe := func(line []byte, complete bool) error {
-		if !complete {
-			savedHash = h.state()
+	partial := false
+	observe := func(p []byte, complete bool) error {
+		if !complete && !partial {
+			savedHash, partial = h.state(), true
 		}
-		h.Write(line)
+		h.Write(p)
+		if complete {
+			partial = false
+		}
 		return ctx.Err()
 	}
 	evidence, next, consumed, err := parser.ReadSessionTimingChunk(ctx, counter, s.Agent, path, state, observe)
+	if errors.Is(err, parser.ErrTimingSourceUnsupported) && prior == nil && ctx.Err() == nil {
+		// The reducer stops early. Prove the imported bytes caused it before
+		// recording a rejection that later appends will carry forward.
+		if timingPrefixMatches(file, before, *s.FileSize, s.FileHash) {
+			return rejectedTimingRecord(s), counter.n + *s.FileSize
+		}
+		return nil, counter.n
+	}
 	if err != nil || ctx.Err() != nil {
 		return nil, counter.n
 	}
 	after, err := file.Stat()
-	if err != nil || !sameTimingSourceInfo(before, after) || evidence.SourceID != timingSourceID(s) {
+	if err != nil || !sameTimingSourceInfo(before, after) {
 		return nil, counter.n
 	}
 	if s.FileHash != nil && *s.FileHash != "" && h.sum() != *s.FileHash {
 		return nil, counter.n
 	}
-	record := &timingEvidenceRecord{Evidence: evidence, Size: *s.FileSize, Agent: s.Agent, SourceID: timingSourceID(s), SourceBytesRead: counter.n, Resumed: prior != nil}
-	if s.FileMtime != nil {
-		record.Mtime = *s.FileMtime
+	if evidence.SourceID != timingSourceID(s) {
+		// A conflicting identity is fixed by the source header or its first
+		// session record. An empty identity may still appear later.
+		if prior == nil && evidence.SourceID != "" && s.FileHash != nil && *s.FileHash != "" {
+			return rejectedTimingRecord(s), counter.n
+		}
+		return nil, counter.n
 	}
-	if s.FileHash != nil {
-		record.Hash = *s.FileHash
-	}
-	if savedHash == nil {
+	record := bindTimingRecord(&timingEvidenceRecord{Evidence: evidence, SourceBytesRead: counter.n, Resumed: prior != nil}, s)
+	if !partial {
 		savedHash = h.state()
 	}
 	if safeOffset := offset + consumed; safeOffset > 0 && next.Evidence.SourceID == record.SourceID {
 		record.Checkpoint = &timingCaptureCheckpoint{Path: path, Offset: safeOffset, HashState: savedHash, State: next}
 	}
 	return record, counter.n
+}
+
+// timingPrefixMatches hashes the imported prefix of an open source and checks
+// that the descriptor did not change while it was read.
+func timingPrefixMatches(file *os.File, before os.FileInfo, size int64, want *string) bool {
+	if want == nil || *want == "" {
+		return false
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return false
+	}
+	digest := sha256.New()
+	if n, err := io.Copy(digest, io.LimitReader(file, size)); err != nil || n != size {
+		return false
+	}
+	after, err := file.Stat()
+	return err == nil && sameTimingSourceInfo(before, after) && hex.EncodeToString(digest.Sum(nil)) == *want
 }
 
 func (db *DB) captureTimingSource(ctx context.Context, s *Session) *timingEvidenceRecord {
@@ -217,14 +284,7 @@ func (db *DB) captureTimingSource(ctx context.Context, s *Session) *timingEviden
 		if evidence == nil {
 			return nil
 		}
-		record := &timingEvidenceRecord{Evidence: evidence, Size: *s.FileSize, Agent: s.Agent, SourceID: timingSourceID(s), SourceBytesRead: *s.FileSize}
-		if s.FileMtime != nil {
-			record.Mtime = *s.FileMtime
-		}
-		if s.FileHash != nil {
-			record.Hash = *s.FileHash
-		}
-		return record
+		return bindTimingRecord(&timingEvidenceRecord{Evidence: evidence, SourceBytesRead: *s.FileSize}, s)
 	}
 	if !strings.HasSuffix(*s.FilePath, ".jsonl") {
 		return nil
@@ -237,11 +297,11 @@ func (db *DB) captureTimingSource(ctx context.Context, s *Session) *timingEviden
 	defer func() { <-timingSourceReads }()
 	var attempted int64
 	if prior := db.loadTimingCheckpoint(ctx, s); prior != nil {
-		if record, n := scanTimingCapture(ctx, s, prior); record != nil {
+		record, n := scanTimingCapture(ctx, s, prior)
+		if record != nil {
 			return record
-		} else {
-			attempted = n
 		}
+		attempted = n
 	}
 	if ctx.Err() != nil {
 		return nil
@@ -255,8 +315,11 @@ func (db *DB) captureTimingSource(ctx context.Context, s *Session) *timingEviden
 
 func writeTimingCheckpoint(ctx context.Context, exec func(context.Context, string, ...any) (sql.Result, error), id string, r *timingEvidenceRecord) error {
 	cp := r.Checkpoint
-	if cp != nil {
-		cursor, err := json.Marshal(cp.State)
+	if cp != nil && cp.State != nil {
+		stored := timingCursor{State: *cp.State, Turns: len(cp.State.Evidence.Turns), Model: len(cp.State.Evidence.Model), Calls: len(cp.State.Evidence.Calls)}
+		// Closed evidence is already in the committed evidence row.
+		stored.State.Evidence = parser.SessionTimingEvidence{SourceID: cp.State.Evidence.SourceID}
+		cursor, err := json.Marshal(stored)
 		if err != nil {
 			return err
 		}

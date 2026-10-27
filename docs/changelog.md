@@ -41,6 +41,11 @@ The latest release is
 - Codex command and MCP calls show measured execution durations when completed
   items record both endpoints and identify the call. Calls without that evidence
   remain unknown. The upgrade reparses available Codex-format sources in place.
+- Claude sessions split from one transcript, such as rewound forks, no longer
+  show each other's activity time. The live turn of a running session keeps
+  counting, including a Claude prompt that has no response yet. Subagent
+  transcripts and other logs that cannot supply timing are no longer reread on
+  every sync.
 - `pg push` saves download traffic when a session grows by comparing short
   hashes with PostgreSQL instead of downloading the session's old text.
   Sessions with rows written before control-character cleanup are rewritten once.

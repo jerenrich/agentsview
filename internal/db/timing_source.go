@@ -28,22 +28,59 @@ var timingSources struct {
 	entries []timingSourceEntry
 }
 
+// ChildSessionsFunc lists a session's direct children from the same store.
+type ChildSessionsFunc func(ctx context.Context, parentID string) ([]Session, error)
+
 // AssembleTimingContext enriches every store's timing with the same optional
 // local source evidence. Sources are never modified. Missing, remote, replaced,
-// forked, oversized or malformed sources retain the archive-only result.
-func AssembleTimingContext(ctx context.Context, sess *Session, turns []TurnRow, calls []CallRow, now time.Time) (*SessionTiming, error) {
+// forked, shared, oversized or malformed sources retain the archive-only result.
+// Children identify Claude files that also hold a fork session's records.
+func AssembleTimingContext(ctx context.Context, sess *Session, turns []TurnRow, calls []CallRow, now time.Time, children ChildSessionsFunc) (*SessionTiming, error) {
 	if sess.DeletedAt != nil {
 		return nil, nil
 	}
-	evidence := readTimingSource(ctx, sess)
+	evidence, err := readOwnedTimingSource(ctx, sess, children)
+	if err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return AssembleTiming(sess, turns, calls, now, evidence), nil
 }
 
-const maxTimingSourceBytes = 256 << 20
-const maxTimingSourceCacheBytes = 32 << 20
+// readOwnedTimingSource reads source evidence only when the whole file can be
+// attributed to sess. Without a saved ingestion decision, Claude forks,
+// continuations, subagent transcripts, and parents of in-file forks are
+// treated as shared: their files can hold another session's records.
+func readOwnedTimingSource(ctx context.Context, sess *Session, children ChildSessionsFunc) (*parser.SessionTimingEvidence, error) {
+	if sess.FilePath == nil || !filepath.IsAbs(*sess.FilePath) || sess.FileSize == nil || *sess.FileSize <= 0 {
+		return nil, nil
+	}
+	if sess.Agent == "claude" {
+		if claudeSubagentTranscript(sess) || sess.RelationshipType == string(parser.RelFork) || sess.RelationshipType == string(parser.RelContinuation) {
+			return nil, nil
+		}
+		if children == nil {
+			return nil, nil
+		}
+		kids, err := children(ctx, sess.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, kid := range kids {
+			if kid.RelationshipType == string(parser.RelFork) && kid.FilePath != nil && *kid.FilePath == *sess.FilePath {
+				return nil, nil
+			}
+		}
+	}
+	return readTimingSource(ctx, sess), nil
+}
+
+const (
+	maxTimingSourceBytes      = 256 << 20
+	maxTimingSourceCacheBytes = 32 << 20
+)
 
 // Bound concurrent decompression and JSON scans, including requests for different
 // sessions. A cancelled request waiting for capacity does no filesystem work.

@@ -117,6 +117,10 @@ func assembleTurnActivity(
 	}
 
 	var sourceTurns, model []activityInterval
+	openStart, hasOpen := int64(0), false
+	if source != nil && source.Open && len(source.Turns) > 0 {
+		openStart, hasOpen = source.Turns[len(source.Turns)-1].Start, true
+	}
 	if source != nil {
 		out.ModelTimingAvailable = len(source.Model) > 0
 		for _, interval := range source.Turns {
@@ -147,6 +151,14 @@ func assembleTurnActivity(
 			}
 		}
 		sort.SliceStable(anchors, func(i, j int) bool { return anchors[i].stamp < anchors[j].stamp })
+		// The unfinished EOF turn of a running session is still in progress.
+		// Like an unanswered archive prompt, it runs until now rather than
+		// stopping at its last observed activity.
+		last := len(windows) - 1
+		openRunning := out.Running && hasOpen && windows[last].start <= openStart && openStart <= windows[last].end
+		if openRunning && hasUpper {
+			windows[last].end = max(windows[last].end, upper)
+		}
 		for _, window := range windows {
 			// Source lifecycle owns the bounds. A transcript message is only a
 			// navigation anchor, including when a resumed turn has no prompt.
@@ -165,6 +177,7 @@ func assembleTurnActivity(
 			})
 			out.ActiveDurationMs += window.end - window.start
 		}
+		out.Activity[last].Running = openRunning
 		// Session metadata can precede the first task, and lifecycle completion
 		// can follow the final visible message. Preserve their combined extent.
 		if hasLower {

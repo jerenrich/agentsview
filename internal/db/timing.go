@@ -133,7 +133,7 @@ func (db *DB) getSessionTiming(ctx context.Context, sessionID string, afterSessi
 	if err != nil {
 		return nil, err
 	}
-	source, err := storedTimingEvidenceWithQuerier(ctx, tx, sess)
+	source, rejected, err := storedTimingEvidenceWithQuerier(ctx, tx, sess)
 	if err != nil {
 		return nil, err
 	}
@@ -141,8 +141,12 @@ func (db *DB) getSessionTiming(ctx context.Context, sessionID string, afterSessi
 		return nil, fmt.Errorf("closing timing snapshot: %w", err)
 	}
 	persisted := source != nil
-	if source == nil {
-		source = readTimingSource(ctx, sess)
+	if source == nil && !rejected {
+		// A saved rejection is authoritative for this source binding.
+		source, err = readOwnedTimingSource(ctx, sess, db.GetChildSessions)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
