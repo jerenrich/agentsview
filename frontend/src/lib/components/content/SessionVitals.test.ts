@@ -299,6 +299,50 @@ describe("SessionVitals", () => {
     expect(document.querySelector(".calls .cd")?.getAttribute("title")).toBe(label);
   });
 
+  it.each(["session metadata", "activity fallback", "invalid metadata", "other session metadata"])(
+    "places tool turns after preceding model work using %s",
+    async (origin) => {
+      const timing = timingWithCall();
+      timing.total_duration_ms = 60000;
+      timing.turns[0]!.started_at = "2026-07-14T12:00:30Z";
+      timing.turns[0]!.duration_ms = 10000;
+      if (origin !== "session metadata") {
+        timing.activity = [
+          {
+            message_id: 10,
+            ordinal: 0,
+            started_at: "2026-07-14T12:00:00Z",
+            duration_ms: 60000,
+            tool_ms: 0,
+            unattributed_ms: 60000,
+            running: false,
+          },
+        ];
+      }
+      const session =
+        origin === "activity fallback"
+          ? undefined
+          : {
+              ...traceSession,
+              ...(origin === "invalid metadata" ? { started_at: "invalid" } : {}),
+              ...(origin === "other session metadata"
+                ? { id: "another-session", started_at: "2026-07-14T11:00:00Z" }
+                : {}),
+            };
+      mocks.fetchSessionTiming.mockResolvedValue(timing);
+      component = mount(SessionVitals, {
+        target: document.body,
+        props: { sessionId: "sess-1", session },
+      });
+      await tick();
+      await tick();
+
+      const mark = document.querySelector<HTMLElement>(".lane-row .lane-mark")!;
+      expect(mark.style.left).toBe("50%");
+      expect(Number.parseFloat(mark.style.width)).toBeCloseTo(100 / 6);
+    },
+  );
+
   it("renders model, tool and unattributed time without idle gaps", async () => {
     mocks.fetchSessionTiming.mockResolvedValue({
       ...mocks.timing,

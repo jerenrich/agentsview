@@ -271,8 +271,21 @@
   // window includes any in-flight running time so live marks reach the
   // right edge of the track.
   let sessionStartMs = $derived.by(() => {
-    if (!timing || timing.turns.length === 0) return 0;
-    return new Date(timing.turns[0]!.started_at).getTime();
+    if (!timing) return 0;
+    let start = Infinity;
+    if (session?.id === timing.session_id && session.started_at) {
+      const timestamp = new Date(session.started_at).getTime();
+      if (Number.isFinite(timestamp)) start = timestamp;
+    }
+    // Prompt/model work can precede the first tool-call turn. Source activity
+    // also provides an origin while sidebar session metadata is still loading.
+    for (const rows of [timing.activity, timing.turns]) {
+      for (const row of rows) {
+        const timestamp = new Date(row.started_at).getTime();
+        if (Number.isFinite(timestamp)) start = Math.min(start, timestamp);
+      }
+    }
+    return Number.isFinite(start) ? start : 0;
   });
 
   let sessionEndMs = $derived.by(() => {
