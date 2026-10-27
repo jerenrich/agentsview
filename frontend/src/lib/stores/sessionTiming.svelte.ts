@@ -37,7 +37,9 @@ class SessionTimingStore {
     const version = ++this.loadVersion;
     const signal = this.timingRead.begin();
     this.loading = true;
-    this.error = null;
+    // A background retry keeps its failure state until fresh evidence arrives.
+    // LiveTick uses it to pause extrapolation while retaining the last snapshot.
+    if (this.timing === null) this.error = null;
     let resolve!: () => void;
     let reject!: (reason: unknown) => void;
     const pending = new Promise<void>((res, rej) => {
@@ -67,11 +69,13 @@ class SessionTimingStore {
       const t = await fetchSessionTiming({ id: sessionId }, { signal });
       if (version !== this.loadVersion || !this.timingRead.isCurrent(signal)) return;
       this.timing = t;
+      this.error = null;
     } catch (e) {
       if (signal.aborted || version !== this.loadVersion || !this.timingRead.isCurrent(signal))
         return;
       this.error = e instanceof Error ? e.message : String(e);
-      this.timing = null;
+      // Preserve a loaded snapshot so quiet-session polling can retry. Initial
+      // load failures still have no snapshot and keep their existing error UI.
     } finally {
       if (this.timingRead.finish(signal)) {
         this.loading = false;

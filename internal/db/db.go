@@ -621,7 +621,8 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // (154: repair queued tool-wait and ignored-user timing boundaries and retry
 // timing publication with committed source bindings for Claude and Codex.)
 // (155: preserve repeated queued waits and close explicitly interrupted Claude turns.)
-const dataVersion = 155
+// (156: repair IDE-envelope and mixed prompt/result timing in local Claude sources.)
+const dataVersion = 156
 
 const archiveOnlyVersionBase = 1 << 20
 

@@ -140,6 +140,15 @@ evidence; they do not establish whether a tool helped the task.
 
 ## Claude Code (`claude`)
 
+- **Compound prompt timing (2026-10-27):** Reverified full ingestion,
+  incremental appends, source deletion, and every-byte checkpoint restarts.
+  Timing shares the provider's user-prompt preprocessing after IDE-envelope
+  removal, so skipped command remainders do not create turns. Text beside a
+  `tool_result` remains a human prompt; the result closes the preceding wait
+  before that prompt starts. Data version 156 reparses local Claude timing in
+  place while preserving session and message identities. Checkpoint version 6
+  rebuilds prior reducer cursors.
+
 - **Repeated queues and interruptions (2026-10-27):** Reverified full and
   incremental native ingestion, source deletion, and every-byte checkpoint
   restarts. Two queued prompts during one outstanding tool call preserve the

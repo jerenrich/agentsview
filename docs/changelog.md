@@ -60,6 +60,11 @@ The latest release is
 
 **Bug fixes**
 
+- Claude timing filters IDE-wrapped command noise and keeps prompts carried
+  alongside tool results in their own activity rows. Live timing retains its
+  last snapshot and retries after temporary refresh failures, pausing elapsed
+  time until fresh data arrives.
+
 - Claude timing stops when a request is explicitly interrupted and preserves
   tool waiting across multiple queued prompts. Failed initial timing publication
   stays bounded to committed messages, and live timeline marks follow the same

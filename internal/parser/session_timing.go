@@ -499,12 +499,18 @@ func (s *SessionTimingState) consume(line []byte, agent, path string) error {
 			}
 			return true
 		})
-		if kind == "user" && !isResult {
+		// A result belongs to the preceding prompt even when the same entry
+		// also carries a new human prompt. Close that wait before splitting.
+		// Late cancellation acknowledgements cannot reopen a completed turn.
+		if kind == "user" && isResult && !s.ClaudeComplete {
+			s.LastClaudeActivity = max(s.LastClaudeActivity, stamp)
+		}
+		if kind == "user" {
 			// Native transcripts also encode interruption markers, IDE
 			// context, and task notifications as user entries. Match the
 			// provider's classification so these do not split a real turn.
-			text, skip := preprocessClaudeUserText(extractCompactSummary(entry.Raw))
-			if !skip && classifyClaudeSystemMessage(text) == "interrupted" && s.Prompt > 0 && stamp >= s.Prompt && stamp >= s.LastClaudeActivity {
+			text, realPrompt := claudeUserPromptText(extractCompactSummary(entry.Raw))
+			if classifyClaudeSystemMessage(text) == "interrupted" && s.Prompt > 0 && stamp >= s.Prompt && stamp >= s.LastClaudeActivity {
 				// An interruption closes the current turn without creating a
 				// human prompt. Cancelled requests cannot keep later queues busy.
 				s.LastClaudeActivity, s.ClaudeComplete = stamp, true
@@ -512,22 +518,12 @@ func (s *SessionTimingState) consume(line []byte, agent, path string) error {
 				clear(calls)
 				clear(ambiguousCalls)
 			}
-			if skip || strings.TrimSpace(text) == "" || isClaudeSystemMessage(text) {
-				return nil
+			if realPrompt {
+				s.closeClaude()
+				s.Prompt, s.LastClaudeActivity = stamp, 0
+				s.ClaudeWaitStart = stamp
+				s.ClaudeComplete = false
 			}
-			s.closeClaude()
-			s.Prompt, s.LastClaudeActivity = stamp, 0
-			s.ClaudeWaitStart = stamp
-			s.ClaudeComplete = false
-		}
-		// A tool result proves activity even if the process stops before
-		// another assistant message is written. Keep its known waiting
-		// interval inside this turn without extending it to wall time.
-		// A cancellation acknowledgement after an interruption (or a late
-		// background result after completion) cannot reopen the closed turn.
-		if kind == "user" && isResult && !s.ClaudeComplete {
-			s.LastClaudeActivity = max(s.LastClaudeActivity, stamp)
-			s.ClaudeComplete = false
 		}
 		if kind == "assistant" {
 			s.LastClaudeActivity = max(s.LastClaudeActivity, stamp)

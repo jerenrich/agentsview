@@ -2640,17 +2640,25 @@ func isCountedClaudeUserTurn(ctx context.Context, entry dagEntry) bool {
 	}
 	content := gjson.Get(entry.line, "message.content")
 	text, _, _, _, _, _, _ := ExtractTextContent(ctx, content)
+	_, real := claudeUserPromptText(text)
+	return real
+}
+
+// claudeUserPromptText applies the same prompt preprocessing after removing
+// an IDE envelope as it does for a bare user entry. Timing shares this rule
+// with the provider's turn count; tool-result blocks are classified separately.
+func claudeUserPromptText(text string) (string, bool) {
 	text, skip := preprocessClaudeUserText(text)
 	if skip || strings.TrimSpace(text) == "" {
-		return false
+		return text, false
 	}
 	if _, _, remainder, ok := splitClaudeIDEEnvelopePrompt(text); ok {
 		if remainder == "" {
-			return false
+			return "", false
 		}
 		text = remainder
 	}
-	return !isClaudeSystemMessage(text)
+	return text, !isClaudeSystemMessage(text)
 }
 
 // extractMessages converts dagEntries into ParsedMessages, applying

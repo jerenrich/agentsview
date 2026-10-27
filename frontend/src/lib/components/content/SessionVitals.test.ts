@@ -110,6 +110,45 @@ describe("SessionVitals", () => {
     vi.unstubAllGlobals();
   });
 
+  it("recovers after a transient quiet-session refresh failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const timing = timingWithCall();
+      timing.running = true;
+      timing.activity = [
+        {
+          message_id: 1,
+          ordinal: 0,
+          started_at: new Date(Date.now() - 1000).toISOString(),
+          duration_ms: 1000,
+          tool_ms: 0,
+          unattributed_ms: 1000,
+          running: true,
+        },
+      ];
+      mocks.fetchSessionTiming
+        .mockReset()
+        .mockResolvedValueOnce(timing)
+        .mockRejectedValueOnce(new Error("503 Service Unavailable"))
+        .mockResolvedValue(timing);
+      component = mount(SessionVitals, {
+        target: document.body,
+        props: { sessionId: "sess-1", session: traceSession },
+      });
+      await tick();
+      await tick();
+      expect(sessionTiming.timing?.running).toBe(true);
+      await vi.advanceTimersByTimeAsync(90000);
+      await tick();
+      expect(mocks.fetchSessionTiming.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(sessionTiming.timing).not.toBeNull();
+    } finally {
+      sessionTiming.reset();
+      await tick();
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps live timeline marks aligned with the advancing axis", async () => {
     const startMs = Date.now() - 5000;
     const timing = timingWithCall();

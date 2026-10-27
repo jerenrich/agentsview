@@ -43,6 +43,27 @@ beforeEach(() => {
 });
 
 describe("SessionTimingStore", () => {
+  it("retains a loaded snapshot and failure state until a refresh recovers", async () => {
+    const initial = { ...timing("s1", 5000), running: true };
+    timingMocks.fetchSessionTiming
+      .mockResolvedValueOnce(initial)
+      .mockRejectedValueOnce(new Error("503 Service Unavailable"));
+    await sessionTiming.load("s1");
+    await sessionTiming.refresh();
+    expect(sessionTiming.timing).toEqual(initial);
+    expect(sessionTiming.error).toBe("503 Service Unavailable");
+    const request = deferred<SessionTiming>();
+    timingMocks.fetchSessionTiming.mockReturnValueOnce(request.promise);
+    const retry = sessionTiming.refresh();
+    expect(sessionTiming.error).toBe("503 Service Unavailable");
+    expect(sessionTiming.timing).toEqual(initial);
+    const completed = timing("s1", 6000);
+    request.resolve(completed);
+    await retry;
+    expect(sessionTiming.timing).toEqual(completed);
+    expect(sessionTiming.error).toBeNull();
+  });
+
   it("refreshes a cached live snapshot and shares an in-flight liveness check", async () => {
     const initial = { ...timing("s1", 5000), running: true };
     timingMocks.fetchSessionTiming.mockResolvedValueOnce(initial);

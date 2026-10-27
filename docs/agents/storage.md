@@ -316,6 +316,8 @@ in local Claude timing, and retries Claude and Codex timing with committed
 source bindings. It preserves existing source, session, and message identities.
 Data version 155 repairs repeated queued waits and explicit Claude interruptions
 in place. Missing sources retain their saved evidence and identities.
+Data version 156 repairs IDE-envelope filtering and prompts beside tool results
+in local Claude timing, preserving the same identities.
 Forced mtime resets preserve currently valid evidence and invalidate mismatched
 records before rebinding; source deletion cannot turn a reset into timing loss.
 Timing reads load session bounds, messages, calls, and saved evidence from one
@@ -327,7 +329,10 @@ caller-wait, and linked-subagent counts. Counts describe available evidence, not
 complete logging. Missing model intervals remain unmeasured, and active time not
 assigned to model or tools remains unattributed. Idle gaps between recorded turns
 are excluded. Claude turn endpoints conservatively follow the last observed
-assistant or tool result in its source format. Provider-classified system entries never split those turns. The total
+assistant or tool result in its source format. IDE envelopes use the canonical
+parser's remainder filtering. Human text carried beside a tool result starts a
+new prompt after the preceding wait closes.
+Provider-classified system entries never split those turns. The total
 timeline preserves the combined extent of session metadata and recorded tasks.
 Source ownership uses a separate projection of fork relationships and paths,
 including trashed forks. Sidebar child summaries are not ownership evidence.
@@ -337,7 +342,9 @@ the existing ten-minute activity window and requires an unchanged, available
 source. Completed, explicitly interrupted, stale, and source-deleted sessions
 retain observed bounds.
 The live client rechecks quiet snapshots every thirty seconds so it stops
-extrapolating when a source goes stale without emitting an update.
+extrapolating when a source goes stale without emitting an update. A failed
+refresh retains the last snapshot and keeps retrying at that cadence, while
+elapsed-time extrapolation pauses until a successful response or SSE update.
 
 This table is local archive metadata and is not published to SQL mirrors or
 conversation exports. Transient `Session.TimingCapture` also stays out of hosted
@@ -370,8 +377,10 @@ Checkpoint version 4 preserves activity up to a queued prompt when a current
 tool request is still pending, ignores canonical user-noise records, and keeps
 explicit Claude completion state. Checkpoint version 5 carries waiting across
 repeated queued prompts, retains the original request-owning prompt boundary,
-and closes explicit Claude interruptions. The pending-read table is also optional
-for read-only archives created before it existed; writable opens add it in place.
+and closes explicit Claude interruptions. Checkpoint version 6 rebuilds prompt
+boundaries using canonical IDE filtering and mixed prompt/result handling.
+The pending-read table is also optional for read-only archives created before
+it existed; writable opens add it in place.
 
 Resumed hashing is checked against the canonical ingestion hash before accepting
 evidence. This proves agreement with the imported snapshot; validation of the

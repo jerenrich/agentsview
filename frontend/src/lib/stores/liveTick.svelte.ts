@@ -19,11 +19,14 @@ class LiveTickStore {
             this.now = Date.now();
             this.refreshedAt = this.now;
             this.timer = setInterval(() => {
-              this.now = Date.now();
+              const now = Date.now();
+              // Failed refreshes retain their snapshot for retry, but do not
+              // provide evidence for more elapsed active time until recovery.
+              if (sessionTiming.error === null) this.now = now;
               // A quiet or stopped source emits no timing event. Recheck the
               // server's bounded liveness instead of extrapolating forever.
-              if (this.now - this.refreshedAt >= 30000) {
-                this.refreshedAt = this.now;
+              if (now - this.refreshedAt >= 30000) {
+                this.refreshedAt = now;
                 void sessionTiming.refresh();
               }
             }, 1000);
