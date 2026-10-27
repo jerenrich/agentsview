@@ -79,7 +79,7 @@ func readTimingSource(ctx context.Context, sess *Session) *parser.SessionTimingE
 		// request waited for capacity.
 		evidence, found = cachedTimingSource(entry)
 		if !found {
-			file, err := os.Open(path)
+			file, err := openTimingSourceFile(path)
 			if err != nil {
 				return nil
 			}

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding"
 	"encoding/hex"
+	"encoding/json/v2"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -208,7 +209,7 @@ func TestTimingCheckpointWorkDoesNotGrowWithArchive(t *testing.T) {
 			prepared := requireTimingCaptureMatchesFull(t, d, s, source)
 			assert.True(t, prepared.TimingCapture.Resumed)
 			assert.LessOrEqual(t, prepared.TimingCapture.SourceBytesRead, int64(len(tail)+63))
-			plan, err := d.getReader().QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+loadTimingCheckpointSQL, s.ID, s.Agent, timingSourceID(&s), timingEvidenceVersion)
+			plan, err := d.getReader().QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+loadTimingCheckpointSQL, s.ID, s.Agent, timingSourceID(&s), timingEvidenceVersion, timingCheckpointVersion, *s.FilePath, *s.FileSize, maxArchivedTimingBytes)
 			require.NoError(t, err)
 			defer plan.Close()
 			for plan.Next() {
@@ -220,4 +221,123 @@ func TestTimingCheckpointWorkDoesNotGrowWithArchive(t *testing.T) {
 			require.NoError(t, plan.Err())
 		})
 	}
+}
+
+func TestTimingCheckpointFiltersInvalidRowsBeforePayloadRead(t *testing.T) {
+	for _, tc := range []struct {
+		name, mutate string
+		limit        int
+	}{
+		{"unknown version", "UPDATE session_timing_checkpoints SET version=999", maxArchivedTimingBytes},
+		{"offset past imported prefix", "UPDATE session_timing_checkpoints SET offset=file_size+1", maxArchivedTimingBytes},
+		{"empty hash state", "UPDATE session_timing_checkpoints SET hash_state=X''", maxArchivedTimingBytes},
+		{"oversized hash state", "UPDATE session_timing_checkpoints SET hash_state=zeroblob(4097)", maxArchivedTimingBytes},
+		{"hash byte limit", "UPDATE session_timing_checkpoints SET hash_state=replace(hex(zeroblob(1024)),'0','界')", maxArchivedTimingBytes},
+		// 80 characters occupy 240 UTF-8 bytes. A character-count limit would
+		// mistakenly return this payload instead of rejecting it in SQLite.
+		{"cursor byte limit", "UPDATE session_timing_checkpoints SET cursor=replace(hex(zeroblob(40)),'0','界')", 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := testDB(t)
+			s := archivedTimingFixture(t, d)
+			require.NoError(t, d.UpsertSession(t.Context(), s))
+			_, err := d.getWriter().Exec(t.Context(), tc.mutate)
+			require.NoError(t, err)
+			rows, err := d.getReader().QueryContext(t.Context(), loadTimingCheckpointSQL, s.ID, s.Agent, timingSourceID(&s), timingEvidenceVersion, timingCheckpointVersion, *s.FilePath, *s.FileSize+1024, tc.limit)
+			require.NoError(t, err)
+			defer rows.Close()
+			assert.False(t, rows.Next(), "invalid metadata must not reach the driver as a result row")
+			require.NoError(t, rows.Err())
+		})
+	}
+}
+
+func TestTimingCheckpointUpgradeDoesNotRequireResync(t *testing.T) {
+	for _, archiveOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("archive_only=%t", archiveOnly), func(t *testing.T) {
+			d := testDB(t)
+			s := archivedTimingFixture(t, d)
+			source, err := os.ReadFile(*s.FilePath)
+			require.NoError(t, err)
+			require.NoError(t, d.UpsertSession(t.Context(), s))
+			before, err := d.GetSessionTiming(t.Context(), s.ID)
+			require.NoError(t, err)
+			var messageID int64
+			require.NoError(t, d.getReader().QueryRowContext(t.Context(), "SELECT id FROM messages WHERE session_id=? AND ordinal=0", s.ID).Scan(&messageID))
+			// Recreate a pre-checkpoint archive with retained evidence and no logs.
+			_, err = d.getWriter().Exec(t.Context(), "DROP TABLE session_timing_checkpoints")
+			require.NoError(t, err)
+			require.NoError(t, os.Remove(*s.FilePath))
+			if archiveOnly {
+				require.NoError(t, d.EnableArchiveOnly(t.Context()))
+			}
+			path := d.Path()
+			require.NoError(t, d.Close())
+			needs, full, err := ArchiveResyncState(t.Context(), path)
+			require.NoError(t, err)
+			assert.False(t, needs)
+			assert.False(t, full)
+			ro, err := OpenReadOnly(t.Context(), path)
+			require.NoError(t, err)
+			timing, err := ro.GetSessionTiming(t.Context(), s.ID)
+			require.NoError(t, err)
+			assert.Equal(t, before, timing)
+			var present int
+			require.NoError(t, ro.getReader().QueryRowContext(t.Context(), "SELECT count(*) FROM sqlite_master WHERE name='session_timing_checkpoints'").Scan(&present))
+			assert.Zero(t, present, "read-only opens must not migrate an archive")
+			require.NoError(t, ro.Close())
+			upgraded, err := OpenIsolated(t.Context(), path)
+			require.NoError(t, err)
+			defer upgraded.Close()
+			timing, err = upgraded.GetSessionTiming(t.Context(), s.ID)
+			require.NoError(t, err)
+			assert.Equal(t, before, timing)
+			require.NoError(t, upgraded.getReader().QueryRowContext(t.Context(), "SELECT count(*) FROM session_timing_checkpoints").Scan(&present))
+			assert.Zero(t, present)
+			var preservedID int64
+			require.NoError(t, upgraded.getReader().QueryRowContext(t.Context(), "SELECT id FROM messages WHERE session_id=? AND ordinal=0", s.ID).Scan(&preservedID))
+			assert.Equal(t, messageID, preservedID)
+			version, only, err := readUserVersion(t.Context(), upgraded.getReader())
+			require.NoError(t, err)
+			assert.Equal(t, CurrentDataVersion(), version)
+			assert.Equal(t, archiveOnly, only)
+			// Plain local capture lazily warms a new checkpoint when logs return.
+			if !archiveOnly {
+				s = writeTimingSnapshot(t, s, source)
+				cold := requireTimingCaptureMatchesFull(t, upgraded, s, source)
+				assert.False(t, cold.TimingCapture.Resumed)
+				require.NoError(t, upgraded.UpsertSession(t.Context(), cold))
+				warm := requireTimingCaptureMatchesFull(t, upgraded, s, source)
+				assert.True(t, warm.TimingCapture.Resumed)
+			}
+		})
+	}
+}
+
+func TestTimingCheckpointIgnoresStalePreDowngradeCursor(t *testing.T) {
+	d := testDB(t)
+	s := archivedTimingFixture(t, d)
+	source, err := os.ReadFile(*s.FilePath)
+	require.NoError(t, err)
+	require.NoError(t, d.UpsertSession(t.Context(), s))
+	// A pre-checkpoint binary updates evidence and session metadata without
+	// touching the optional cursor table. Its stale row must not be resumed.
+	newer := append(source, []byte(`{"opaque":"written by older binary"}`+"\n")...)
+	s = writeTimingSnapshot(t, s, newer)
+	r, _ := scanTimingCapture(t.Context(), &s, nil)
+	require.NotNil(t, r)
+	payload, err := json.Marshal(r.Evidence)
+	require.NoError(t, err)
+	_, err = d.getWriter().Exec(t.Context(), "UPDATE session_timing_evidence SET file_size=?,file_mtime=?,file_hash=?,evidence=? WHERE session_id=?", r.Size, r.Mtime, r.Hash, string(payload), s.ID)
+	require.NoError(t, err)
+	_, err = d.getWriter().Exec(t.Context(), "UPDATE sessions SET file_size=?,file_mtime=?,file_hash=? WHERE id=?", r.Size, r.Mtime, r.Hash, s.ID)
+	require.NoError(t, err)
+	assert.Nil(t, d.loadTimingCheckpoint(t.Context(), &s))
+	prepared := requireTimingCaptureMatchesFull(t, d, s, newer)
+	assert.False(t, prepared.TimingCapture.Resumed)
+	require.NoError(t, d.UpsertSession(t.Context(), prepared))
+	var hash string
+	err = d.getReader().QueryRowContext(t.Context(), "SELECT file_hash FROM session_timing_checkpoints WHERE session_id=?", s.ID).Scan(&hash)
+	require.NoError(t, err)
+	assert.Equal(t, *s.FileHash, hash)
 }

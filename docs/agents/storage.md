@@ -307,8 +307,11 @@ state and are not copied during orphan/trash preservation rebuilds. The archived
 evidence remains available without a checkpoint or source file.
 
 Resumed hashing is checked against the canonical ingestion hash before accepting
-evidence. Changed prefixes, truncation, moved paths, incompatible codecs, and
-invalid checkpoints fall back to a bounded cold capture. A missing checkpoint
+evidence. This proves agreement with the imported snapshot; validation of the
+previous prefix still relies on the provider's append checks rather than a
+second full-source hash. Prefixes that disagree with the imported hash,
+truncation, moved paths, incompatible codecs, and invalid checkpoints fall back
+to a bounded cold capture. A missing checkpoint
 warms on the next successful capture; unchanged archives need no parser resync.
 Incomplete JSONL suffixes are reread, and EOF previews never close unfinished
 turns or tool requests in the saved reducer. SHA state is saved only at complete
@@ -322,6 +325,22 @@ provider parsing and fingerprinting may perform additional source reads. Archive
 zstd streams keep the bounded full-scan path because compressed byte offsets do
 not identify decoded JSONL boundaries. Compression/restoration changes warm a
 new plaintext checkpoint when appropriate.
+
+Checkpoint version, source binding, offset, and payload byte limits are checked
+in SQLite before loading the cursor or hash state. The optional table is not a
+read-only schema requirement: pre-checkpoint archives can still serve saved
+timing without migrations or source logs. A writable open adds it without
+changing parser versions, session/message identities, or archive-only mode.
+An older binary may leave a stale checkpoint when it updates evidence; the
+evidence/hash join rejects that row and the next capture warms a new one. Future
+reducer or cursor changes must bump `timingCheckpointVersion`. Cursor-codec
+upgrades alone must not require rebuilding the persistent archive. Changes to
+stored timing semantics still follow the parser data-version policy.
+
+Source reads reject non-regular paths before opening and verify the descriptor
+after opening. Unix opens are nonblocking so replacement with a named pipe
+cannot pin a capture worker. Regular files and symlinks to regular files retain
+the same import behavior.
 
 **Deferred PR handoff:** timing evidence and checkpoints remain local to SQLite.
 The eventual PR description must flag that PostgreSQL, DuckDB, and ClickHouse

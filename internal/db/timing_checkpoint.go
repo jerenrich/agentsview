@@ -80,14 +80,22 @@ func (h *alignedTimingHash) sum() string {
 const loadTimingCheckpointSQL = `SELECT c.version,c.file_path,c.offset,c.hash_state,c.cursor,c.file_size
  FROM session_timing_checkpoints c JOIN session_timing_evidence e ON e.session_id=c.session_id
  WHERE c.session_id=? AND c.agent=? AND c.source_id=? AND e.version=?
- AND e.agent=c.agent AND e.source_id=c.source_id AND e.file_size=c.file_size AND e.file_hash=c.file_hash`
+ AND e.agent=c.agent AND e.source_id=c.source_id AND e.file_size=c.file_size AND e.file_hash=c.file_hash
+ AND c.version=? AND c.file_path=? AND c.file_size<=?
+ AND c.offset>0 AND c.offset<=c.file_size
+ AND length(CAST(c.cursor AS BLOB))<=? AND length(CAST(c.hash_state AS BLOB)) BETWEEN 1 AND 4096`
 
 func (db *DB) loadTimingCheckpoint(ctx context.Context, s *Session) *timingCaptureCheckpoint {
+	if s.FilePath == nil || s.FileSize == nil {
+		return nil
+	}
 	var version int
 	var cp timingCaptureCheckpoint
 	var cursor []byte
 	var importedSize int64
-	err := db.getReader().QueryRowContext(ctx, loadTimingCheckpointSQL, s.ID, s.Agent, timingSourceID(s), timingEvidenceVersion).Scan(&version, &cp.Path, &cp.Offset, &cp.HashState, &cursor, &importedSize)
+	// Filter incompatible and oversized rows in SQLite before the driver copies
+	// their payloads into Go memory. Cursor limits count bytes, not characters.
+	err := db.getReader().QueryRowContext(ctx, loadTimingCheckpointSQL, s.ID, s.Agent, timingSourceID(s), timingEvidenceVersion, timingCheckpointVersion, *s.FilePath, *s.FileSize, maxArchivedTimingBytes).Scan(&version, &cp.Path, &cp.Offset, &cp.HashState, &cursor, &importedSize)
 	if err != nil || version != timingCheckpointVersion || s.FilePath == nil || cp.Path != *s.FilePath || s.FileSize == nil || cp.Offset <= 0 || cp.Offset > *s.FileSize || importedSize > *s.FileSize || len(cursor) > maxArchivedTimingBytes || len(cp.HashState) > 4096 {
 		return nil
 	}
@@ -120,13 +128,17 @@ func scanTimingCapture(ctx context.Context, s *Session, prior *timingCaptureChec
 	if !strings.HasSuffix(path, ".jsonl") {
 		return nil, 0
 	}
-	file, err := os.Open(path)
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || *s.FileSize > info.Size() {
+		return nil, 0
+	}
+	file, err := openTimingSourceFile(path)
 	if err != nil {
 		return nil, 0
 	}
 	defer file.Close()
 	before, err := file.Stat()
-	if err != nil || !before.Mode().IsRegular() || *s.FileSize > before.Size() {
+	if err != nil || !before.Mode().IsRegular() || !sameTimingSourceInfo(info, before) {
 		return nil, 0
 	}
 	offset := int64(0)

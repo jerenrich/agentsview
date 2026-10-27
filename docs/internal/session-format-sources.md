@@ -148,6 +148,7 @@ evidence; they do not establish whether a tool helped the task.
 - **Checkpointed timing (2026-10-27):** Reverified record-split/restart fixtures
   for pending tool results, human/system prompt classification, and incomplete
   JSONL suffixes. Checkpoints retain metadata only, preserving full-read timing.
+  Source-access hardening rejects named pipes without changing reducer semantics.
 
 - **Activity timing (2026-10-27):** Reverified against local transcript copies
   and timing parser fixtures. Assistant `thinkingDurationMs` supplies a model
@@ -627,7 +628,9 @@ fixtures retain this field; missing identities remain source-local.
   process restarts with full reads of copied rollouts, including continuation
   pages. Complete-line checkpoints preserve unfinished turns and requests;
   compressed rollouts retain the full streaming capture path. Timing outputs
-  and normalized archive content remain unchanged.
+  and normalized archive content remain unchanged. Reverified non-regular
+  source rejection, optional-table upgrades, and stale downgrade cursors;
+  these changes need no parser resync.
 
 - **Activity timing (2026-10-27):** Reverified against copied local rollouts
   and `session_timing_test.go` fixtures. `task_started` through `task_complete`
