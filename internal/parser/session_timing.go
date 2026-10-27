@@ -2,10 +2,13 @@ package parser
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"go.kenn.io/agentsview/internal/ctxio"
@@ -51,23 +54,181 @@ func ReadCompressedSessionTiming(ctx context.Context, source io.Reader, agent st
 // rather than mixing the parent and child timelines. An optional source path
 // resolves continuation page identities using the normal Codex parser rules.
 func ReadSessionTiming(ctx context.Context, source io.Reader, agent string, sourcePath ...string) (*SessionTimingEvidence, error) {
-	if agent != string(AgentCodex) && agent != string(AgentClaude) {
-		return nil, ErrTimingSourceUnsupported
+	path := ""
+	if len(sourcePath) > 0 {
+		path = sourcePath[0]
 	}
-	out := &SessionTimingEvidence{}
-	starts := map[string]int64{}
-	calls := map[string]int64{}
-	ambiguousCalls := map[string]bool{}
-	var lastActivity int64
-	closeOpenTurns := func() {
-		for id, start := range starts {
-			out.Turns = append(out.Turns, TimingInterval{start, max(start, lastActivity)})
-			delete(starts, id)
+	evidence, _, _, err := ReadSessionTimingChunk(ctx, source, agent, path, nil, nil)
+	return evidence, err
+}
+
+// SessionTimingState is a resumable, content-free timing reducer. Evidence holds
+// only closed turns; Snapshot adds provisional EOF bounds without closing state.
+// Persist only at a complete JSONL boundary, never with a partial source record.
+type SessionTimingState struct {
+	Evidence           SessionTimingEvidence
+	Starts             map[string]int64
+	Calls              map[string]int64
+	AmbiguousCalls     map[string]bool
+	LastActivity       int64
+	Prompt             int64
+	LastClaudeActivity int64
+}
+
+func (s *SessionTimingState) Clone() *SessionTimingState {
+	if s == nil {
+		return &SessionTimingState{Starts: map[string]int64{}, Calls: map[string]int64{}, AmbiguousCalls: map[string]bool{}}
+	}
+	out := *s
+	out.Evidence.Turns = slices.Clone(s.Evidence.Turns)
+	out.Evidence.Model = slices.Clone(s.Evidence.Model)
+	out.Evidence.Calls = slices.Clone(s.Evidence.Calls)
+	// JSON checkpoints encode empty slices as arrays. Normalize them so a
+	// restarted reducer has the same evidence shape as a fresh scan.
+	if len(out.Evidence.Turns) == 0 {
+		out.Evidence.Turns = nil
+	}
+	if len(out.Evidence.Model) == 0 {
+		out.Evidence.Model = nil
+	}
+	if len(out.Evidence.Calls) == 0 {
+		out.Evidence.Calls = nil
+	}
+	out.Starts = maps.Clone(s.Starts)
+	out.Calls = maps.Clone(s.Calls)
+	out.AmbiguousCalls = maps.Clone(s.AmbiguousCalls)
+	if out.Starts == nil {
+		out.Starts = map[string]int64{}
+	}
+	if out.Calls == nil {
+		out.Calls = map[string]int64{}
+	}
+	if out.AmbiguousCalls == nil {
+		out.AmbiguousCalls = map[string]bool{}
+	}
+	return &out
+}
+
+func (s *SessionTimingState) closeOpenTurns() {
+	for id, start := range s.Starts {
+		s.Evidence.Turns = append(s.Evidence.Turns, TimingInterval{start, max(start, s.LastActivity)})
+		delete(s.Starts, id)
+	}
+}
+
+func (s *SessionTimingState) closeClaude() {
+	if s.Prompt > 0 && s.LastClaudeActivity >= s.Prompt {
+		s.Evidence.Turns = append(s.Evidence.Turns, TimingInterval{s.Prompt, s.LastClaudeActivity})
+	}
+}
+
+// Snapshot returns evidence without mutating unfinished turns or tool requests.
+func (s *SessionTimingState) Snapshot(agent string) *SessionTimingEvidence {
+	out := s.Evidence
+	out.Turns = slices.Clone(out.Turns)
+	if agent == string(AgentClaude) {
+		if s.Prompt > 0 && s.LastClaudeActivity >= s.Prompt {
+			out.Turns = append(out.Turns, TimingInterval{s.Prompt, s.LastClaudeActivity})
+		}
+	} else {
+		for _, start := range s.Starts {
+			out.Turns = append(out.Turns, TimingInterval{start, max(start, s.LastActivity)})
 		}
 	}
+	return &out
+}
+
+// Valid bounds decoded checkpoint metadata before it can allocate more state.
+func (s *SessionTimingState) Valid() bool {
+	if s == nil {
+		return false
+	}
+	n := len(s.Evidence.Model) + len(s.Evidence.Calls) + len(s.Evidence.Turns) + len(s.Starts) + len(s.Calls) + len(s.AmbiguousCalls)
+	if n > 100000 || len(s.Starts) > 1 {
+		return false
+	}
+	for _, spans := range [][]TimingInterval{s.Evidence.Model, s.Evidence.Turns} {
+		for _, v := range spans {
+			if v.End < v.Start {
+				return false
+			}
+		}
+	}
+	for _, v := range s.Evidence.Calls {
+		if v.End < v.Start {
+			return false
+		}
+	}
+	return true
+}
+
+// ReadSessionTimingChunk resumes from a complete-line checkpoint. Observe sees
+// raw bytes transiently, with complete=false for a final unterminated record;
+// callers may hash them, but must not retain them in the checkpoint. The returned
+// state excludes that partial record while the evidence preserves legacy EOF
+// parsing. CompleteBytes is relative to this chunk's beginning.
+func ReadSessionTimingChunk(ctx context.Context, source io.Reader, agent, path string, previous *SessionTimingState, observe func([]byte, bool) error) (*SessionTimingEvidence, *SessionTimingState, int64, error) {
+	if agent != string(AgentCodex) && agent != string(AgentClaude) {
+		return nil, nil, 0, ErrTimingSourceUnsupported
+	}
+	if previous != nil && !previous.Valid() {
+		return nil, nil, 0, ErrTimingSourceUnsupported
+	}
+	state := previous.Clone()
+	bounded := &io.LimitedReader{R: ctxio.Reader{Context: ctx, Reader: source}, N: (256 << 20) + 1}
+	scanner := bufio.NewScanner(bounded)
+	scanner.Buffer(make([]byte, initialScanBufSize), maxLineSize)
+	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			return i + 1, data[:i+1], nil
+		}
+		if atEOF && len(data) > 0 {
+			return len(data), data, nil
+		}
+		return 0, nil, nil
+	})
+	var completeBytes int64
+	var preview *SessionTimingState
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, 0, err
+		}
+		line := scanner.Bytes()
+		complete := len(line) > 0 && line[len(line)-1] == '\n'
+		if observe != nil {
+			if err := observe(line, complete); err != nil {
+				return nil, nil, 0, err
+			}
+		}
+		target := state
+		if !complete {
+			preview = state.Clone()
+			target = preview
+		} else {
+			completeBytes += int64(len(line))
+		}
+		if err := target.consume(line, agent, path); err != nil {
+			return nil, nil, 0, err
+		}
+	}
+	if bounded.N == 0 {
+		return nil, nil, 0, ErrTimingSourceUnsupported
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, nil, 0, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, 0, err
+	}
+	if preview != nil {
+		return preview.Snapshot(agent), state, completeBytes, nil
+	}
+	return state.Snapshot(agent), state, completeBytes, nil
+}
+
+func (s *SessionTimingState) consume(line []byte, agent, path string) error {
+	out, starts, calls, ambiguousCalls := &s.Evidence, s.Starts, s.Calls, s.AmbiguousCalls
 	request := func(id string, stamp int64) {
-		// gjson strings can reference a whole JSON record. Clone IDs that
-		// outlive this iteration so a small key cannot pin a tool body.
 		id = strings.Clone(id)
 		if id == "" {
 			return
@@ -84,178 +245,146 @@ func ReadSessionTiming(ctx context.Context, source io.Reader, agent string, sour
 		delete(calls, id)
 		delete(ambiguousCalls, id)
 	}
-	var prompt, lastClaudeActivity int64
-	closeClaude := func() {
-		if prompt > 0 && lastClaudeActivity >= prompt {
-			out.Turns = append(out.Turns, TimingInterval{prompt, lastClaudeActivity})
-		}
+	if !gjson.ValidBytes(line) {
+		return nil
 	}
-	bounded := &io.LimitedReader{R: source, N: (256 << 20) + 1}
-	scanner := bufio.NewScanner(bounded)
-	scanner.Buffer(make([]byte, initialScanBufSize), maxLineSize)
-	for scanner.Scan() {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	entry := gjson.ParseBytes(line)
+	if agent == string(AgentCodex) && entry.Get("type").Str == "session_meta" {
+		payload := entry.Get("payload")
+		if payload.Get("forked_from_id").Str != "" || payload.Get("source.subagent").Exists() {
+			return ErrTimingSourceUnsupported
 		}
-		line := scanner.Bytes()
-		if !gjson.ValidBytes(line) {
-			continue
-		}
-		entry := gjson.ParseBytes(line)
-		if agent == string(AgentCodex) && entry.Get("type").Str == "session_meta" {
-			payload := entry.Get("payload")
-			if payload.Get("forked_from_id").Str != "" || payload.Get("source.subagent").Exists() {
-				return nil, ErrTimingSourceUnsupported
+		id := payload.Get("id").Str
+		// Use the same exact filename/header checks as normalized ingestion.
+		// A continuation page has a distinct archive identity even when its
+		// header identifies the thread (or an older header identifies the rollout).
+		if path != "" {
+			thread := codexRevertPageThreadID(CodexSessionUUIDFromFilename(filepath.Base(path)), id, payload.Get("session_id").Str)
+			if page, _, ok := codexRevertPage(path, thread, "", "", false); ok {
+				id = page
 			}
-			id := payload.Get("id").Str
-			// Use the same exact filename/header checks as normalized ingestion.
-			// A continuation page has a distinct archive identity even when its
-			// header identifies the thread (or an older header identifies the rollout).
-			if len(sourcePath) > 0 {
-				path := sourcePath[0]
-				thread := codexRevertPageThreadID(CodexSessionUUIDFromFilename(filepath.Base(path)), id, payload.Get("session_id").Str)
-				if page, _, ok := codexRevertPage(path, thread, "", "", false); ok {
-					id = page
+		}
+		if out.SourceID != "" && id != "" && out.SourceID != id {
+			return ErrTimingSourceUnsupported
+		}
+		if id != "" {
+			out.SourceID = strings.Clone(id)
+		}
+		return nil
+	}
+	ts := parseTimestamp(entry.Get("timestamp").Str)
+	if ts.IsZero() {
+		return nil
+	}
+	stamp := ts.UnixMilli()
+	if agent == string(AgentCodex) {
+		payload := entry.Get("payload")
+		switch entry.Get("type").Str {
+		case "event_msg":
+			id := payload.Get("turn_id").Str
+			switch payload.Get("type").Str {
+			case "task_started":
+				if _, exists := starts[id]; id != "" && !exists {
+					// A resumed task cannot extend an abandoned predecessor
+					// across the idle gap, even when its completion is absent.
+					s.closeOpenTurns()
+					starts[strings.Clone(id)], s.LastActivity = stamp, stamp
 				}
-			}
-			if out.SourceID != "" && id != "" && out.SourceID != id {
-				return nil, ErrTimingSourceUnsupported
-			}
-			if id != "" {
-				out.SourceID = strings.Clone(id)
-			}
-			continue
-		}
-		ts := parseTimestamp(entry.Get("timestamp").Str)
-		if ts.IsZero() {
-			continue
-		}
-		stamp := ts.UnixMilli()
-		if agent == string(AgentCodex) {
-			payload := entry.Get("payload")
-			switch entry.Get("type").Str {
-			case "event_msg":
-				id := payload.Get("turn_id").Str
-				switch payload.Get("type").Str {
-				case "task_started":
-					if _, exists := starts[id]; id != "" && !exists {
-						// A resumed task cannot extend an abandoned predecessor
-						// across the idle gap, even when its completion is absent.
-						closeOpenTurns()
-						starts[strings.Clone(id)], lastActivity = stamp, stamp
-					}
-				case "task_complete", "turn_aborted":
-					// Older abort events can omit turn_id; a single active
-					// lifecycle is the only unambiguous target.
-					if id == "" && len(starts) == 1 {
-						for active := range starts {
-							id = active
-						}
-					}
-					if start, ok := starts[id]; ok && stamp >= start {
-						out.Turns = append(out.Turns, TimingInterval{start, stamp})
-						delete(starts, id)
-					}
-				case "item_completed":
-					kind := payload.Get("item.type").Str
-					start, startOK := codexExecutionTimestamp(payload.Get("started_at_ms"))
-					end, endOK := codexExecutionTimestamp(payload.Get("completed_at_ms"))
-					if (kind == "Reasoning" || kind == "AgentMessage") && startOK && endOK && start.UnixMilli() > 0 && !end.Before(start) {
-						out.Model = append(out.Model, TimingInterval{start.UnixMilli(), end.UnixMilli()})
+			case "task_complete", "turn_aborted":
+				// Older abort events can omit turn_id; a single active
+				// lifecycle is the only unambiguous target.
+				if id == "" && len(starts) == 1 {
+					for active := range starts {
+						id = active
 					}
 				}
-			case "response_item":
-				id := payload.Get("call_id").Str
-				switch payload.Get("type").Str {
-				case "function_call", "custom_tool_call":
-					request(id, stamp)
-				case "function_call_output", "custom_tool_call_output":
+				if start, ok := starts[id]; ok && stamp >= start {
+					out.Turns = append(out.Turns, TimingInterval{start, stamp})
+					delete(starts, id)
+				}
+			case "item_completed":
+				kind := payload.Get("item.type").Str
+				start, startOK := codexExecutionTimestamp(payload.Get("started_at_ms"))
+				end, endOK := codexExecutionTimestamp(payload.Get("completed_at_ms"))
+				if (kind == "Reasoning" || kind == "AgentMessage") && startOK && endOK && start.UnixMilli() > 0 && !end.Before(start) {
+					out.Model = append(out.Model, TimingInterval{start.UnixMilli(), end.UnixMilli()})
+				}
+			}
+		case "response_item":
+			id := payload.Get("call_id").Str
+			switch payload.Get("type").Str {
+			case "function_call", "custom_tool_call":
+				request(id, stamp)
+			case "function_call_output", "custom_tool_call_output":
+				result(id, stamp)
+			}
+		}
+		if len(starts) > 0 {
+			kind := payload.Get("type").Str
+			responseActivity := entry.Get("type").Str == "response_item" && payload.Get("role").Str != "user" && payload.Get("role").Str != "developer" && payload.Get("role").Str != "system"
+			eventActivity := entry.Get("type").Str == "event_msg" && kind != "task_started" && kind != "user_message" && kind != "thread_settings_applied"
+			_, belongs := starts[payload.Get("turn_id").Str]
+			if (payload.Get("turn_id").Str == "" || belongs) && (responseActivity || eventActivity) {
+				s.LastActivity = max(s.LastActivity, stamp)
+			}
+		}
+	} else {
+		if entry.Get("isSidechain").Bool() || isHiddenClaudeMeta(entry.Raw) {
+			return nil
+		}
+		if id := entry.Get("sessionId").Str; id != "" {
+			if out.SourceID != "" && out.SourceID != id {
+				return ErrTimingSourceUnsupported
+			}
+			out.SourceID = strings.Clone(id)
+		}
+		kind := entry.Get("type").Str
+		if kind != "user" && kind != "assistant" {
+			return nil
+		}
+		blocks := entry.Get("message.content")
+		isResult := false
+		blocks.ForEach(func(_, block gjson.Result) bool {
+			switch block.Get("type").Str {
+			case "tool_use":
+				if kind == "assistant" {
+					request(block.Get("id").Str, stamp)
+				}
+			case "tool_result":
+				isResult = true
+				id := block.Get("tool_use_id").Str
+				if kind == "user" {
 					result(id, stamp)
 				}
 			}
-			if len(starts) > 0 {
-				kind := payload.Get("type").Str
-				responseActivity := entry.Get("type").Str == "response_item" && payload.Get("role").Str != "user" && payload.Get("role").Str != "developer" && payload.Get("role").Str != "system"
-				eventActivity := entry.Get("type").Str == "event_msg" && kind != "task_started" && kind != "user_message" && kind != "thread_settings_applied"
-				_, belongs := starts[payload.Get("turn_id").Str]
-				if (payload.Get("turn_id").Str == "" || belongs) && (responseActivity || eventActivity) {
-					lastActivity = max(lastActivity, stamp)
-				}
+			return true
+		})
+		if kind == "user" && !isResult {
+			// Native transcripts also encode interruption markers, IDE
+			// context, and task notifications as user entries. Match the
+			// provider's classification so these do not split a real turn.
+			text, skip := preprocessClaudeUserText(extractCompactSummary(entry.Raw))
+			if skip || classifyClaudeSystemMessage(text) != "" {
+				return nil
 			}
-		} else {
-			if entry.Get("isSidechain").Bool() || isHiddenClaudeMeta(entry.Raw) {
-				continue
-			}
-			if id := entry.Get("sessionId").Str; id != "" {
-				if out.SourceID != "" && out.SourceID != id {
-					return nil, ErrTimingSourceUnsupported
-				}
-				out.SourceID = strings.Clone(id)
-			}
-			kind := entry.Get("type").Str
-			if kind != "user" && kind != "assistant" {
-				continue
-			}
-			blocks := entry.Get("message.content")
-			isResult := false
-			blocks.ForEach(func(_, block gjson.Result) bool {
-				switch block.Get("type").Str {
-				case "tool_use":
-					if kind == "assistant" {
-						request(block.Get("id").Str, stamp)
-					}
-				case "tool_result":
-					isResult = true
-					id := block.Get("tool_use_id").Str
-					if kind == "user" {
-						result(id, stamp)
-					}
-				}
-				return true
-			})
-			if kind == "user" && !isResult {
-				// Native transcripts also encode interruption markers, IDE
-				// context, and task notifications as user entries. Match the
-				// provider's classification so these do not split a real turn.
-				text, skip := preprocessClaudeUserText(extractCompactSummary(entry.Raw))
-				if skip || classifyClaudeSystemMessage(text) != "" {
-					continue
-				}
-				closeClaude()
-				prompt, lastClaudeActivity = stamp, 0
-			}
-			// A tool result proves activity even if the process stops before
-			// another assistant message is written. Keep its known waiting
-			// interval inside this turn without extending it to wall time.
-			if kind == "user" && isResult {
-				lastClaudeActivity = max(lastClaudeActivity, stamp)
-			}
-			if kind == "assistant" {
-				lastClaudeActivity = max(lastClaudeActivity, stamp)
-				if duration := entry.Get("thinkingDurationMs").Int(); duration > 0 && duration <= stamp {
-					out.Model = append(out.Model, TimingInterval{stamp - duration, stamp})
-				}
+			s.closeClaude()
+			s.Prompt, s.LastClaudeActivity = stamp, 0
+		}
+		// A tool result proves activity even if the process stops before
+		// another assistant message is written. Keep its known waiting
+		// interval inside this turn without extending it to wall time.
+		if kind == "user" && isResult {
+			s.LastClaudeActivity = max(s.LastClaudeActivity, stamp)
+		}
+		if kind == "assistant" {
+			s.LastClaudeActivity = max(s.LastClaudeActivity, stamp)
+			if duration := entry.Get("thinkingDurationMs").Int(); duration > 0 && duration <= stamp {
+				out.Model = append(out.Model, TimingInterval{stamp - duration, stamp})
 			}
 		}
-		// Bound retained metadata independently of potentially large payloads.
-		if len(out.Model)+len(out.Calls)+len(out.Turns)+len(starts)+len(calls) > 100000 {
-			return nil, ErrTimingSourceUnsupported
-		}
 	}
-	if bounded.N == 0 {
-		return nil, ErrTimingSourceUnsupported
+	if len(out.Model)+len(out.Calls)+len(out.Turns)+len(starts)+len(calls) > 100000 {
+		return ErrTimingSourceUnsupported
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if agent == string(AgentClaude) {
-		closeClaude()
-	} else {
-		// Stop at observed activity, never wall time or a later prompt.
-		closeOpenTurns()
-	}
-	return out, nil
+	return nil
 }

@@ -1684,7 +1684,7 @@ func (db *DB) upsertSession(ctx context.Context,
 ) (sessionUpsertResult, error) {
 	s = db.sessionForStorage(s)
 	if reviveSourceMissing {
-		s = prepareTimingEvidence(ctx, s)
+		s = db.prepareTimingEvidence(ctx, s)
 	} else {
 		s.TimingCapture = nil
 	}

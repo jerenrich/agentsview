@@ -145,6 +145,10 @@ evidence; they do not establish whether a tool helped the task.
   timing evidence and coverage. Source turn boundaries remain conservative;
   archived evidence does not make missing model duration fields measurable.
 
+- **Checkpointed timing (2026-10-27):** Reverified record-split/restart fixtures
+  for pending tool results, human/system prompt classification, and incomplete
+  JSONL suffixes. Checkpoints retain metadata only, preserving full-read timing.
+
 - **Activity timing (2026-10-27):** Reverified against local transcript copies
   and timing parser fixtures. Assistant `thinkingDurationMs` supplies a model
   activity interval ending at its timestamp. Matching `tool_use` and
@@ -618,6 +622,12 @@ fixtures retain this field; missing identities remain source-local.
   activity reader. Continuation pages use the same exact filename/header
   identity rules as normalized ingestion; modern thread-ID and older rollout-ID
   headers were reverified against page fixtures and copied logs.
+
+- **Checkpointed timing (2026-10-27):** Compared staged plaintext appends and
+  process restarts with full reads of copied rollouts, including continuation
+  pages. Complete-line checkpoints preserve unfinished turns and requests;
+  compressed rollouts retain the full streaming capture path. Timing outputs
+  and normalized archive content remain unchanged.
 
 - **Activity timing (2026-10-27):** Reverified against copied local rollouts
   and `session_timing_test.go` fixtures. `task_started` through `task_complete`

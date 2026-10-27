@@ -162,7 +162,7 @@ func (db *DB) WriteSessionBatchContext(
 
 	writes = slices.Clone(writes)
 	for i := range writes {
-		writes[i].Session = prepareTimingEvidence(ctx, writes[i].Session)
+		writes[i].Session = db.prepareTimingEvidence(ctx, writes[i].Session)
 	}
 
 	db.mu.Lock()
@@ -262,7 +262,7 @@ func (db *DB) WriteSessionBatchAtomic(ctx context.Context,
 
 	writes = slices.Clone(writes)
 	for i := range writes {
-		writes[i].Session = prepareTimingEvidence(ctx, writes[i].Session)
+		writes[i].Session = db.prepareTimingEvidence(ctx, writes[i].Session)
 	}
 
 	db.mu.Lock()

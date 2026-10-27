@@ -296,6 +296,38 @@ and slice capacities. Captures exceeding source bounds or the 32 MiB metadata
 limit, forked rollouts, joined sidechains, and unsupported providers retain the
 archive fallback and its estimated-boundary label.
 
+### Timing capture checkpoints
+
+Plaintext Codex and Claude JSONL captures resume from
+`session_timing_checkpoints`. Each row contains a versioned timing reducer,
+complete-line byte offset, source binding, and resumable SHA-256 state. Evidence
+and its checkpoint commit in the same transaction; full imports publish them
+only after normalized content succeeds. Checkpoints are disposable optimization
+state and are not copied during orphan/trash preservation rebuilds. The archived
+evidence remains available without a checkpoint or source file.
+
+Resumed hashing is checked against the canonical ingestion hash before accepting
+evidence. Changed prefixes, truncation, moved paths, incompatible codecs, and
+invalid checkpoints fall back to a bounded cold capture. A missing checkpoint
+warms on the next successful capture; unchanged archives need no parser resync.
+Incomplete JSONL suffixes are reread, and EOF previews never close unfinished
+turns or tool requests in the saved reducer. SHA state is saved only at complete
+64-byte blocks, so no transcript bytes are retained in its buffer; resuming
+rereads at most 63 bytes before the JSONL boundary to reconstruct that buffer.
+
+Source I/O for a verified append covers the new tail, an unfinished prior line,
+and at most 63 bytes of hash reconstruction. Timing metadata is still decoded
+and serialized as a bounded snapshot. This I/O bound concerns timing capture;
+provider parsing and fingerprinting may perform additional source reads. Archived
+zstd streams keep the bounded full-scan path because compressed byte offsets do
+not identify decoded JSONL boundaries. Compression/restoration changes warm a
+new plaintext checkpoint when appropriate.
+
+**Deferred PR handoff:** timing evidence and checkpoints remain local to SQLite.
+The eventual PR description must flag that PostgreSQL, DuckDB, and ClickHouse
+mirrors do not retain this evidence and can show less complete timing when
+source logs are unavailable. SQL mirror support is intentionally deferred.
+
 ### Codex incremental import state
 
 Four SQLite-only tables support local Codex imports: `parser_checkpoints` holds

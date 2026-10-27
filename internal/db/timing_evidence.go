@@ -16,12 +16,15 @@ const timingEvidenceVersion = 1
 const maxArchivedTimingBytes = 32 << 20
 
 type timingEvidenceRecord struct {
-	Evidence *parser.SessionTimingEvidence
-	Size     int64
-	Mtime    int64
-	Hash     string
-	Agent    string
-	SourceID string
+	Checkpoint      *timingCaptureCheckpoint
+	SourceBytesRead int64
+	Resumed         bool
+	Evidence        *parser.SessionTimingEvidence
+	Size            int64
+	Mtime           int64
+	Hash            string
+	Agent           string
+	SourceID        string
 }
 
 func timingSourceID(s *Session) string {
@@ -31,9 +34,9 @@ func timingSourceID(s *Session) string {
 	return strings.TrimPrefix(s.ID, "codex:")
 }
 
-// Capture before taking the writer lock. Repeated scans are bounded by the
-// existing source cache and scan semaphore, and only changed writes reach here.
-func prepareTimingEvidence(ctx context.Context, s Session) Session {
+// Capture before taking the writer lock. Verified plaintext checkpoints resume
+// at the complete-line boundary; cold and compressed scans remain bounded.
+func (db *DB) prepareTimingEvidence(ctx context.Context, s Session) Session {
 	if s.TimingCapture != nil && s.TimingCapture.Evidence != nil && timingEvidenceMatchesSession(s.TimingCapture, &s) {
 		return s
 	}
@@ -41,22 +44,11 @@ func prepareTimingEvidence(ctx context.Context, s Session) Session {
 	if s.Agent != "codex" && s.Agent != "claude" {
 		return s
 	}
-	evidence := readTimingSource(ctx, &s)
-	if evidence == nil {
-		// Never replace retained evidence on an unreadable source.
-		return s
+	record := db.captureTimingSource(ctx, &s)
+	if record != nil {
+		s.TimingCapture = record
 	}
-	r := &timingEvidenceRecord{Evidence: evidence, Agent: s.Agent, SourceID: timingSourceID(&s)}
-	if s.FileSize != nil {
-		r.Size = *s.FileSize
-	}
-	if s.FileMtime != nil {
-		r.Mtime = *s.FileMtime
-	}
-	if s.FileHash != nil {
-		r.Hash = *s.FileHash
-	}
-	s.TimingCapture = r
+
 	return s
 }
 
@@ -64,7 +56,7 @@ func prepareTimingEvidence(ctx context.Context, s Session) Session {
 // ingestion starts. The caller publishes this same capture only after its
 // normalized content write succeeds; no second source read is needed.
 func (db *DB) PrepareSessionTimingEvidence(ctx context.Context, s Session) Session {
-	return prepareTimingEvidence(ctx, s)
+	return db.prepareTimingEvidence(ctx, s)
 }
 
 // PublishSessionTimingEvidence completes a full ingestion's timing publication.
@@ -142,7 +134,10 @@ func writeTimingEvidence(ctx context.Context, exec func(context.Context, string,
  version=excluded.version, agent=excluded.agent, source_id=excluded.source_id,
  file_size=excluded.file_size, file_mtime=excluded.file_mtime, file_hash=excluded.file_hash, evidence=excluded.evidence`,
 		id, timingEvidenceVersion, r.Agent, r.SourceID, r.Size, r.Mtime, r.Hash, string(payload))
-	return err
+	if err != nil {
+		return err
+	}
+	return writeTimingCheckpoint(ctx, exec, id, r)
 }
 
 func (db *DB) storedTimingEvidence(ctx context.Context, s *Session) (*parser.SessionTimingEvidence, error) {
@@ -195,7 +190,7 @@ func (db *DB) prepareIncrementalTiming(ctx context.Context, id string, update In
 	if update.FileHash != nil {
 		s.FileHash = update.FileHash
 	}
-	prepared := prepareTimingEvidence(ctx, s)
+	prepared := db.prepareTimingEvidence(ctx, s)
 	update.TimingCapture = prepared.TimingCapture
 	return update, ctx.Err()
 }

@@ -19,7 +19,7 @@ func (db *DB) ReplaceSessionKeepingTrashedCopy(
 	if err := db.requireWritable(); err != nil {
 		return "", err
 	}
-	write.Session = prepareTimingEvidence(ctx, write.Session)
+	write.Session = db.prepareTimingEvidence(ctx, write.Session)
 	write.ReplaceMessages = true
 	write.RejectMessageCountDecrease = false
 	write = db.storageSessionBatchWrite(sanitizeSessionBatchWrite(write))

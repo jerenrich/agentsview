@@ -1666,3 +1666,11 @@ CREATE TABLE IF NOT EXISTS session_timing_evidence (
  file_size INTEGER NOT NULL, file_mtime INTEGER NOT NULL, file_hash TEXT NOT NULL,
  evidence TEXT NOT NULL
 );
+
+-- Disposable local timing continuation state; evidence remains the archive.
+CREATE TABLE IF NOT EXISTS session_timing_checkpoints (
+ session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+ version INTEGER NOT NULL, agent TEXT NOT NULL, source_id TEXT NOT NULL,
+ file_path TEXT NOT NULL, file_size INTEGER NOT NULL, file_hash TEXT NOT NULL,
+ offset INTEGER NOT NULL, hash_state BLOB NOT NULL, cursor TEXT NOT NULL
+);
