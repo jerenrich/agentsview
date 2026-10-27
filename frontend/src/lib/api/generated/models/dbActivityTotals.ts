@@ -3,6 +3,7 @@
  */
 
 export interface DbActivityTotals {
+  model_ms?: number;
   tool_ms: number;
   unattributed_ms: number;
 }

@@ -6,6 +6,7 @@ export interface DbCallTiming {
   category: string;
   /** @nullable */
   duration_ms: number | null;
+  duration_source?: string;
   input_preview: string;
   is_parallel: boolean;
   skill_name?: string;

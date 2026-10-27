@@ -140,6 +140,75 @@ evidence; they do not establish whether a tool helped the task.
 
 ## Claude Code (`claude`)
 
+- **Compound prompt timing (2026-10-27):** Reverified full ingestion,
+  incremental appends, source deletion, and every-byte checkpoint restarts.
+  Timing shares the provider's user-prompt preprocessing after IDE-envelope
+  removal, so skipped command remainders do not create turns. Text beside a
+  `tool_result` remains a human prompt; the result closes the preceding wait
+  before that prompt starts. Data version 156 reparses local Claude timing in
+  place while preserving session and message identities. Checkpoint version 6
+  rebuilds prior reducer cursors.
+
+- **Repeated queues and interruptions (2026-10-27):** Reverified full and
+  incremental native ingestion, source deletion, and every-byte checkpoint
+  restarts. Two queued prompts during one outstanding tool call preserve the
+  entire wait across both boundaries. Canonical `interrupted` system-user
+  markers close the active turn at their timestamp, stop live extrapolation,
+  and cancel pending timing requests without creating a human prompt. Data
+  version 155 reparses local Claude timing with identities preserved;
+  checkpoint version 5 rebuilds earlier reducer cursors.
+
+- **Queued waiting and prompt noise (2026-10-27):** Reverified full ingestion,
+  failed-write reads, and every-byte checkpoint restarts. Queued prompts can
+  arrive while a tool waits; the previous active window then reaches the
+  queued boundary rather than inventing an idle gap. Whitespace-only users and
+  unclassified local-command envelopes follow the canonical parser's noise
+  rules. Explicit assistant `stop_reason` completion ends live timing. Data
+  version 154 reparses these timing semantics in place; checkpoint version 4
+  rebuilds prior reducer cursors without retaining transcript bodies.
+
+- **Timing parser parity (2026-10-27):** Reverified queued prompt attachments,
+  explicit `isCompactSummary` boundaries, and cumulative assistant snapshots
+  against normalized ingestion and checkpoint/restart fixtures. Queued human
+  prompts start turns; compact summaries remain system boundaries within the
+  active turn. Repeated `tool_use` blocks in one assistant `message.id` run
+  represent the same request, retaining its first timestamp across snapshots.
+  Different message IDs that reuse a pending call ID remain ambiguous.
+  Checkpoint version 3 retains only message/call IDs for this distinction.
+  Data version 153 reparses local Claude timing in place.
+
+- **Shared-file timing (2026-10-27):** Reverified with in-file fork and
+  background-fork lineage fixtures. When the DAG parse splits a file into
+  several sessions, or lineage drops a replayed parent prefix, the file's
+  records belong to more than one session. Every result is marked
+  `SourceTimingShared` and stores a timing rejection, because the timing reader
+  scans the whole file. Retry branches inside one session keep whole-file
+  timing. `subagents/agent-*.jsonl` transcripts are all sidechain records and
+  are rejected by path. A final prompt with no response is an open zero-length
+  turn, so a live session shows it as running.
+
+- **Timing retention (2026-10-27):** Copied-session ingestion and source-deletion
+  checks reverify the fields below. Local SQLite ingestion retains content-free
+  timing evidence and coverage. Source turn boundaries remain conservative;
+  archived evidence does not make missing model duration fields measurable.
+
+- **Checkpointed timing (2026-10-27):** Reverified record-split/restart fixtures
+  for pending tool results, human/system prompt classification, and incomplete
+  JSONL suffixes. Checkpoints retain metadata only, preserving full-read timing.
+  Source-access hardening rejects named pipes without changing reducer semantics.
+
+- **Activity timing (2026-10-27):** Reverified against local transcript copies
+  and timing parser fixtures. Assistant `thinkingDurationMs` supplies a model
+  activity interval ending at its timestamp. Matching `tool_use` and
+  `tool_result` IDs supply caller waiting intervals. User prompts through the
+  last observed assistant or tool-result timestamp conservatively bound active
+  turns, including EOF before another assistant response. Canonical system-user
+  classification excludes interruption markers, IDE context, and notifications
+  from prompt boundaries. Out-of-order activity cannot shorten a known window.
+  Sidechain records and hidden `isMeta` entries are excluded using the provider parser
+  rule; channel-origin user messages remain prompts. Absent duration fields
+  remain unattributed. Reverified against hidden-metadata and channel fixtures.
+
 - **Blank thinking usage (2026-10-27):** Reverified against the synthetic
   transcript in [#2469](https://github.com/kenn-io/agentsview/issues/2469),
   kept in `internal/parser/testdata/claude/blank_thinking_usage.jsonl`. An
@@ -150,6 +219,7 @@ evidence; they do not establish whether a tool helped the task.
   response. It is stored as a hidden system row that keeps its usage; a blank
   record with all-zero usage is still skipped. Data version 150 reparses
   Claude-format sources in place.
+
 - **Channel messages (2026-10-23):** Reverified against the synthetic Claude
   Code 2.1.305 Telegram transcript in
   [#2400](https://github.com/kenn-io/agentsview/issues/2400), kept in
@@ -600,6 +670,67 @@ fixtures retain this field; missing identities remain source-local.
   `internal/parser/cowork_paths.go`, and `internal/parser/cowork_provider.go`.
 
 ## Codex (`codex`)
+
+- **Oversized records (2026-10-27):** Reverified against the provider line
+  reader: records longer than 64 MiB are skipped, not fatal. The timing reader
+  now skips them the same way while hashing every byte, so one oversized record
+  no longer discards a rollout's timing or forces a rescan on every append.
+
+- **Timing retention (2026-10-27):** The copied-rollout ingestion and deletion
+  regression checks reverify the activity fields below. Local SQLite ingestion
+  retains only timing identifiers and intervals, tied to the imported source
+  hash and size; deleting the rollout does not change the resulting breakdown.
+  Coverage counts describe observed intervals, without assuming all model
+  intervals were logged. Forked/subagent rollouts remain unsupported by this
+  activity reader. Continuation pages use the same exact filename/header
+  identity rules as normalized ingestion; modern thread-ID and older rollout-ID
+  headers were reverified against page fixtures and copied logs.
+
+- **Checkpointed timing (2026-10-27):** Compared staged plaintext appends and
+  process restarts with full reads of copied rollouts, including continuation
+  pages. Complete-line checkpoints preserve unfinished turns and requests;
+  compressed rollouts retain the full streaming capture path. Timing outputs
+  and normalized archive content remain unchanged. Reverified non-regular
+  source rejection, optional-table upgrades, and stale downgrade cursors;
+  these changes need no parser resync.
+
+- **Activity timing (2026-10-27):** Reverified against copied local rollouts
+  and `session_timing_test.go` fixtures. `task_started` through `task_complete`
+  or `turn_aborted`, paired by `turn_id`, define active windows independent of
+  visible prompts. Completed `Reasoning` and `AgentMessage` items provide
+  `started_at_ms` and `completed_at_ms` model intervals. Matching response-item
+  `call_id` request/output pairs measure caller waiting, not execution. Shared
+  bounded streaming decompression reads Codex `.jsonl.zst` logs. Open turns stop
+  at the last observed assistant/tool activity, before a new task starts. A
+  missing abort ID closes only the single unambiguous active turn. Overlapping
+  requests that reuse an ID and ambiguous archive matches remain unmeasured.
+  Metadata identity is validated even without an envelope timestamp. Forked or
+  subagent sources fall back to archive evidence. Reverified with resumed,
+  missing-completion, reused-ID, and identity-conflict fixtures.
+
+- **Execution timing (checked 2026-10-27):** Codex's
+  [`ItemCompletedEvent`](https://github.com/openai/codex/blob/2cab11ca40aad193382348a7bda46da2fc47596a/codex-rs/protocol/src/protocol.rs#L2154-L2165)
+  carries an optional `started_at_ms` and a `completed_at_ms` that older records
+  may omit. The
+  [rollout persistence policy](https://github.com/openai/codex/blob/2cab11ca40aad193382348a7bda46da2fc47596a/codex-rs/rollout/src/policy.rs#L229-L283)
+  retains completed execution items in paginated history. The
+  [command emitter](https://github.com/openai/codex/blob/2cab11ca40aad193382348a7bda46da2fc47596a/codex-rs/core/src/tools/events.rs#L567-L591)
+  and [MCP emitter](https://github.com/openai/codex/blob/2cab11ca40aad193382348a7bda46da2fc47596a/codex-rs/core/src/mcp_tool_call.rs#L1085-L1105)
+  use the tool call ID as the execution item's ID. AgentsView normalizes
+  completed or failed `CommandExecution` and `McpToolCall` items with valid,
+  ordered integer endpoints into content-free `tool_execution` events. Both
+  endpoints must be present; neither envelope timestamps, output delivery times,
+  nor reported duration alone supply a missing boundary. Existing result events
+  keep the tool output. IDs match exactly; nested code-mode executions with
+  different IDs are not attributed to an outer call. Other item kinds and
+  incomplete executions remain unmeasured. Data version 152 reparses Codex,
+  TraeX, and Augure Code sources in place without changing source or session
+  identities. Parser and sync regressions cover duplicate records, failed and
+  zero-duration executions, malformed endpoints, overlapping intervals, blocked
+  output, and late completion records after a checkpoint. Late timing updates
+  use an indexed exact-ID lookup limited to two occurrences: a unique target
+  can be updated incrementally, unknown IDs are discarded, and reused IDs use
+  the existing authoritative full-parse fallback.
 
 - **Dialogue classification (checked 2026-10-22):** The pinned
   [response schema](https://github.com/openai/codex/blob/c71297b9a9b3f7995445eff8d768837814ac06f8/codex-rs/protocol/src/models.rs#L31-L96)

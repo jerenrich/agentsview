@@ -19,6 +19,7 @@ func (db *DB) ReplaceSessionKeepingTrashedCopy(
 	if err := db.requireWritable(); err != nil {
 		return "", err
 	}
+	write.Session = db.prepareTimingEvidence(ctx, write.Session)
 	write.ReplaceMessages = true
 	write.RejectMessageCountDecrease = false
 	write = db.storageSessionBatchWrite(sanitizeSessionBatchWrite(write))
@@ -36,6 +37,10 @@ func (db *DB) ReplaceSessionKeepingTrashedCopy(
 	}
 	if src.DeletedAt != nil {
 		return "", ErrSessionTrashed
+	}
+	retainedEvidence, _, err := db.storedTimingEvidence(ctx, src)
+	if err != nil {
+		return "", err
 	}
 	tx, err := db.getWriter().BeginTx(ctx, nil)
 	if err != nil {
@@ -103,6 +108,10 @@ func (db *DB) ReplaceSessionKeepingTrashedCopy(
 	if keepCopy {
 		copyID = replacedSessionCopyID(id, time.Now())
 		copyWrite := db.storageSessionBatchWrite(sessionCopyWrite(*src, copyID, stored))
+		if retainedEvidence != nil {
+			copyWrite.Session.SourceSessionID = retainedEvidence.SourceID
+			copyWrite.Session.TimingCapture = &timingEvidenceRecord{Evidence: retainedEvidence, Agent: src.Agent, SourceID: retainedEvidence.SourceID}
+		}
 		copyWrite.UsageEvents = make([]UsageEvent, len(events))
 		for i, ev := range events {
 			ev.ID, ev.SessionID = 0, copyID

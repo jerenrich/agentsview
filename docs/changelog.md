@@ -38,6 +38,14 @@ The latest release is
 
 **Improvements**
 
+- Codex command and MCP calls show measured execution durations when completed
+  items record both endpoints and identify the call. Calls without that evidence
+  remain unknown. The upgrade reparses available Codex-format sources in place.
+- Claude sessions split from one transcript, such as rewound forks, no longer
+  show each other's activity time. The live turn of a running session keeps
+  counting, including a Claude prompt that has no response yet. Subagent
+  transcripts and other logs that cannot supply timing are no longer reread on
+  every sync.
 - `pg push` saves download traffic when a session grows by comparing short
   hashes with PostgreSQL instead of downloading the session's old text.
   Sessions with rows written before control-character cleanup are rewritten once.
@@ -52,6 +60,30 @@ The latest release is
 
 **Bug fixes**
 
+- Stalled timing checks time out after thirty seconds, keeping the last snapshot
+  and pausing the live clock until fresh data arrives. Leaving the sessions
+  view stops timing polling; returning rechecks the cached session.
+
+- Claude timing filters IDE-wrapped command noise and keeps prompts carried
+  alongside tool results in their own activity rows. Live timing retains its
+  last snapshot and retries after temporary refresh failures, pausing elapsed
+  time until fresh data arrives.
+
+- Claude timing stops when a request is explicitly interrupted and preserves
+  tool waiting across multiple queued prompts. Failed initial timing publication
+  stays bounded to committed messages, and live timeline marks follow the same
+  advancing scale as their labels.
+
+- Unfinished Claude and Codex sessions now advance their live timing after real
+  ingestion. Completed and stale work stays bounded. Queued prompts preserve
+  ongoing tool waits, and ignored command output no longer invents turns.
+  Failed imports retain committed timing through restart and source cleanup;
+  source-only reads also exclude activity from visible or trashed forks.
+- Claude activity timing recognizes queued prompts, ignores compact summaries
+  as prompt boundaries, and preserves tool waits across cumulative assistant
+  snapshots. Timing can recover after a source replacement, and the live
+  **Active** total advances with its turn rows. Available Claude and Codex
+  sources are reprocessed in place; retained archives remain available.
 - Claude Code token and cost totals now include responses that contain only an
   empty thinking block. These responses still show nothing in the transcript,
   but their usage was dropped. Existing Claude-format sources are reprocessed on

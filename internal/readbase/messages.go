@@ -220,7 +220,17 @@ func (s Sessions) GetSessionTiming(ctx context.Context, sessionID string) (*db.S
 	if err != nil {
 		return nil, err
 	}
-	return db.AssembleTiming(sess, turnRows, callRows, time.Now().UTC()), nil
+	return db.AssembleTimingContext(ctx, sess, turnRows, callRows, time.Now().UTC(), s.GetTimingSourceChildren)
+}
+
+// GetTimingSourceChildren loads source ownership, including retained trashed forks.
+func (s Sessions) GetTimingSourceChildren(ctx context.Context, parentID string) ([]db.Session, error) {
+	rows, err := s.backend.QueryContext(ctx, `SELECT file_path, relationship_type
+ FROM sessions WHERE parent_session_id=? AND relationship_type='fork'`, parentID)
+	if err != nil {
+		return nil, err
+	}
+	return db.ScanTimingSourceChildren(rows)
 }
 
 // MessageWindowSQL builds ordinal windows while preserving each driver's revision projection.

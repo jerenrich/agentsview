@@ -48,6 +48,9 @@ func rawBaseAlias(m rawsync.CanonicalManifest, s db.Session) string {
 }
 
 func encodeRawPayload(p ingest.PreparedSession) ([]byte, error) {
+	// A pending local capture is neither normalized content nor remote transport
+	// state. Session is a value copy, so clearing it preserves the caller.
+	p.Session.TimingCapture = nil
 	// Dialogue belongs to mutable derived state, outside immutable content.
 	p.Messages = slices.Clone(p.Messages)
 	for i := range p.Messages {
@@ -197,6 +200,11 @@ func rawCanonicalValue(v reflect.Value, field string) (any, error) {
 		out := map[string]any{}
 		for i := range v.NumField() {
 			f := v.Type().Field(i)
+			// Transient ingestion evidence must never change normalized-content-v1,
+			// including the representation of sessions with an empty capture.
+			if v.Type() == rawSessionType && f.Name == "TimingCapture" {
+				continue
+			}
 			// Projection bookkeeping and inherited trash scope add no content.
 			// Omit empty GroupKey and PlanUsage values so existing revisions stay stable. Derived tool
 			// observation fields preserve the historical normalized-content-v1 representation.

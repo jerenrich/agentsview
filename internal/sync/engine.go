@@ -16529,6 +16529,16 @@ func (e *Engine) tryIncrementalJSONL(
 	}
 
 	if isCodexFormatAgent(agent) {
+		var safe bool
+		toolCallUpdates, safe, err = e.resolveCodexTimingUpdates(ctx, inc.ID, toolCallUpdates)
+		if err != nil {
+			lease.Release()
+			return processResult{err: err}, true
+		}
+		if !safe {
+			lease.Release()
+			return processResult{forceReplace: true}, false
+		}
 		prepareCodexResultIdentities(newMsgs, toolCallUpdates)
 	}
 	if len(toolCallUpdates) > 0 {
@@ -18477,6 +18487,7 @@ func (e *Engine) writeBatchWithOutcomeContext(
 		// dependent write succeeds below. For incremental updates
 		// (writeIncremental), messages are written first since the session
 		// already exists.
+		s = e.db.PrepareSessionTimingEvidence(ctx, s)
 		revivingSourceMissing, err := e.upsertSessionPendingContentForWrite(ctx, pw, s)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -18566,6 +18577,15 @@ func (e *Engine) writeBatchWithOutcomeContext(
 			continue
 		}
 
+		if err := e.db.PublishSessionTimingEvidence(ctx, s); err != nil {
+			if ctx.Err() != nil {
+				return outcome
+			}
+			log.Printf("publish timing for session %s: %v", s.ID, err)
+			e.markStaleFailedMemberWrite(ctx, pw)
+			outcome.failedSessions++
+			continue
+		}
 		if ctx.Err() != nil {
 			return outcome
 		}
@@ -18813,6 +18833,11 @@ func (e *Engine) prepareSessionNormalizedContext(
 	// session is not counted here.
 	if pw.sess.GenMetadataWithoutUsage {
 		e.anomalies.recordGenMetadataWithoutUsageSession(s.Agent)
+	}
+	if pw.sess.SourceTimingShared {
+		// The file also holds another session's records, so every writer
+		// stores a rejection instead of whole-file activity timing.
+		prepared.Session = db.ExcludeSessionTimingEvidence(prepared.Session)
 	}
 	return prepared, sessionWriteOK, ctx.Err()
 }
@@ -19206,6 +19231,7 @@ func (e *Engine) writeBatchBulkWithOutcomeContext(
 			// The bulk batch would normally create the session row, so
 			// mirror the standard write path's session upsert and
 			// post-write sequence here.
+			s = e.db.PrepareSessionTimingEvidence(ctx, s)
 			_, err := e.upsertSessionPendingContentForWrite(ctx, pw, s)
 			if err != nil {
 				if isIntentionalSessionSkip(err) {
@@ -19230,6 +19256,15 @@ func (e *Engine) writeBatchBulkWithOutcomeContext(
 				log.Printf(
 					"write staged session %s: %v", s.ID, err,
 				)
+				e.markStaleFailedMemberWrite(ctx, pw)
+				outcome.failedSessions++
+				continue
+			}
+			if err := e.db.PublishSessionTimingEvidence(ctx, s); err != nil {
+				if ctx.Err() != nil {
+					return outcome
+				}
+				log.Printf("publish timing for staged session %s: %v", s.ID, err)
 				e.markStaleFailedMemberWrite(ctx, pw)
 				outcome.failedSessions++
 				continue
@@ -20274,6 +20309,7 @@ func (e *Engine) writeSessionFullWithResolver(
 		return errSessionPreserved
 	}
 	s, msgs := prepared.Session, prepared.Messages
+	s = e.db.PrepareSessionTimingEvidence(ctx, s)
 	_, err = e.upsertSessionPendingContentForWrite(ctx, pw, s)
 	if err != nil {
 		if isIntentionalSessionSkip(err) {
@@ -20342,6 +20378,10 @@ func (e *Engine) writeSessionFullWithResolver(
 			)
 			return err
 		}
+	}
+	if err := e.db.PublishSessionTimingEvidence(ctx, s); err != nil {
+		log.Printf("publish timing for session %s: %v", s.ID, err)
+		return err
 	}
 	if err := e.db.ReplaceSessionUsageEvents(ctx,
 		s.ID, prepared.UsageEvents,

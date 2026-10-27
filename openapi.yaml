@@ -967,6 +967,9 @@ components:
     DbActivityTotals:
       additionalProperties: false
       properties:
+        model_ms:
+          format: int64
+          type: integer
         tool_ms:
           format: int64
           type: integer
@@ -1067,6 +1070,8 @@ components:
           type:
             - integer
             - "null"
+        duration_source:
+          type: string
         input_preview:
           type: string
         is_parallel:
@@ -2970,6 +2975,9 @@ components:
     DbSessionTiming:
       additionalProperties: false
       properties:
+        active_duration_ms:
+          format: int64
+          type: integer
         activity:
           items:
             $ref: "#/components/schemas/DbTurnActivity"
@@ -2980,6 +2988,13 @@ components:
           items:
             $ref: "#/components/schemas/DbCategoryTotal"
           type: array
+        coverage:
+          $ref: "#/components/schemas/DbTimingCoverage"
+        idle_duration_ms:
+          format: int64
+          type: integer
+        model_timing_available:
+          type: boolean
         running:
           type: boolean
         session_id:
@@ -2991,6 +3006,8 @@ components:
         subagent_count:
           format: int64
           type: integer
+        timing_source:
+          type: string
         tool_call_count:
           format: int64
           type: integer
@@ -3988,6 +4005,53 @@ components:
         - sessions
         - user_messages
       type: object
+    DbTimingCoverage:
+      additionalProperties: false
+      properties:
+        caller_wait_calls:
+          format: int64
+          type: integer
+        evidence:
+          type: string
+        execution_calls:
+          format: int64
+          type: integer
+        model_intervals:
+          format: int64
+          type: integer
+        recorded_turns:
+          format: int64
+          type: integer
+        subagent_calls:
+          format: int64
+          type: integer
+        timed_tool_calls:
+          format: int64
+          type: integer
+        tool_calls:
+          format: int64
+          type: integer
+        turn_boundaries:
+          type: string
+        unattributed_ms:
+          format: int64
+          type: integer
+        version:
+          format: int64
+          type: integer
+      required:
+        - evidence
+        - version
+        - turn_boundaries
+        - recorded_turns
+        - model_intervals
+        - tool_calls
+        - timed_tool_calls
+        - execution_calls
+        - caller_wait_calls
+        - subagent_calls
+        - unattributed_ms
+      type: object
     DbToolAgentBreakdown:
       additionalProperties: false
       properties:
@@ -4382,6 +4446,9 @@ components:
           format: int64
           type: integer
         message_id:
+          format: int64
+          type: integer
+        model_ms:
           format: int64
           type: integer
         ordinal:

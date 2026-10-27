@@ -414,7 +414,7 @@ func (b *codexSessionBuilder) processLine(ctx context.Context,
 		if b.suppresses(codexTypeEventMsg, payload) {
 			return false, nil
 		}
-		b.handleEventMsg(payload)
+		b.handleEventMsg(ctx, payload)
 	case codexTypeHistoryMutation:
 		return false, b.handleHistoryMutation(ctx, payload, ts)
 	case codexTypeTokenUsageRecord:
@@ -589,7 +589,7 @@ func (b *codexSessionBuilder) handleAgentMessage(
 	})
 }
 
-func (b *codexSessionBuilder) handleEventMsg(payload gjson.Result) {
+func (b *codexSessionBuilder) handleEventMsg(ctx context.Context, payload gjson.Result) {
 	eventType := payload.Get("type").Str
 	switch eventType {
 	case "task_started", "task_complete", "turn_aborted":
@@ -600,6 +600,8 @@ func (b *codexSessionBuilder) handleEventMsg(payload gjson.Result) {
 		b.handleCollabAgentSpawnEnd(payload)
 	case "sub_agent_activity":
 		b.handleSubagentActivity(payload)
+	case "item_completed":
+		b.handleCompletedExecutionTiming(ctx, payload)
 	}
 }
 
@@ -2834,7 +2836,7 @@ func (p *codexProvider) parseSessionFromWithSources(ctx context.Context,
 		return codexIncrementalParseResult{}, errCodexIncrementalNeedsFullParse
 	}
 	for _, update := range b.sink.ToolCallUpdates() {
-		if !update.TargetKnown {
+		if !update.TargetKnown && !update.IsExecutionTiming() {
 			return codexIncrementalParseResult{}, errCodexIncrementalNeedsFullParse
 		}
 	}

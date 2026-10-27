@@ -141,7 +141,7 @@
         sessions.cancelRouteReads();
         messages.cancelInFlight();
         sessionActivity.cancelInFlight();
-        sessionTiming.cancelInFlight();
+        sessionTiming.pause();
         pins.cancelSessionPinsRead();
         sync.unwatchSession();
         return;
@@ -172,7 +172,7 @@
         }
         messages.loadSession(id);
         sessions.loadChildSessions(id);
-        sessionTiming.load(id);
+        sessionTiming.resume(id);
         sync.watchSession(
           id,
           () => {

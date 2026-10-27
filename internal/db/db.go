@@ -612,7 +612,17 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // (150: keep token usage on Claude assistant records that render no text, such
 // as blank thinking. Re-parse Claude-format sources in place; source and
 // session identities are unchanged.)
-const dataVersion = 150
+// (151: retain Claude observed tool-result timing endpoints in preview archives.)
+// (152: retain local Codex and Claude activity/execution timing, including
+// continuation pages, and reparse upstream provider changes in preview archives
+// whose independently allocated versions overlapped 148-151.)
+// (153: repair Claude queued-prompt, compact-summary, and cumulative-call timing,
+// and stale timing rejections on replaced Claude and Codex sources in place.)
+// (154: repair queued tool-wait and ignored-user timing boundaries and retry
+// timing publication with committed source bindings for Claude and Codex.)
+// (155: preserve repeated queued waits and close explicitly interrupted Claude turns.)
+// (156: repair IDE-envelope and mixed prompt/result timing in local Claude sources.)
+const dataVersion = 156
 
 const archiveOnlyVersionBase = 1 << 20
 
@@ -1962,6 +1972,7 @@ var readOnlyRequiredTables = []string{
 	"artifact_checkpoint_stages",
 	"artifact_checkpoint_stage_sessions",
 	"artifact_imported_sessions",
+	"session_timing_evidence",
 }
 
 var (

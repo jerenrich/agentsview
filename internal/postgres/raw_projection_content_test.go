@@ -1,12 +1,15 @@
 package postgres
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/dbtest"
 	"go.kenn.io/agentsview/internal/ingest"
 )
 
@@ -229,4 +232,38 @@ func TestRawContentRevisionJSONRepresentation(t *testing.T) {
 	projectedKey, err := rawMessageKey(p.Messages[0])
 	require.NoError(t, err)
 	assert.Equal(t, key, projectedKey)
+}
+
+func TestRawContentAndPayloadIgnoreTransientTimingCapture(t *testing.T) {
+	database := dbtest.OpenTestDB(t)
+	source := `{"timestamp":"2026-04-26T10:00:00Z","type":"session_meta","payload":{"id":"timing-source"}}` + "\n" +
+		`{"timestamp":"2026-04-26T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}` + "\n" +
+		`{"timestamp":"2026-04-26T10:00:01Z","type":"response_item","payload":{"type":"function_call","call_id":"private-capture-call-id"}}` + "\n" +
+		`{"timestamp":"2026-04-26T10:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"private-capture-call-id"}}` + "\n" +
+		`{"timestamp":"2026-04-26T10:00:05Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn"}}` + "\n"
+	path := filepath.Join(t.TempDir(), "timing.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(source), 0o600))
+	p := ingest.PreparedSession{Session: db.Session{ID: "codex:timing-source", Agent: "codex", FilePath: &path, FileSize: new(int64(len(source)))}, Messages: []db.Message{{Ordinal: 0, Role: "assistant", Content: "normalized answer"}}}
+	revision, err := rawContentRevision(p)
+	require.NoError(t, err)
+	payload, err := encodeRawPayload(p)
+	require.NoError(t, err)
+	p.Session = database.PrepareSessionTimingEvidence(t.Context(), p.Session)
+	capture := p.Session.TimingCapture
+	require.NotNil(t, capture)
+	require.Len(t, capture.Evidence.Calls, 1)
+	assert.Equal(t, "private-capture-call-id", capture.Evidence.Calls[0].ID)
+	withCapture, err := rawContentRevision(p)
+	require.NoError(t, err)
+	assert.Equal(t, revision, withCapture, "local timing must not change immutable normalized identities")
+	withPayload, err := encodeRawPayload(p)
+	require.NoError(t, err)
+	assert.Equal(t, payload, withPayload, "timing staging metadata must stay out of gob transport")
+	assert.NotContains(t, string(withPayload), "private-capture-call-id")
+	decoded, err := decodeRawPayload(withPayload)
+	require.NoError(t, err)
+	assert.Nil(t, decoded.Session.TimingCapture)
+	assert.Same(t, capture, p.Session.TimingCapture, "hashing and encoding preserve the caller's prepared capture")
+	require.Len(t, p.Session.TimingCapture.Evidence.Calls, 1)
+	assert.Equal(t, "private-capture-call-id", p.Session.TimingCapture.Evidence.Calls[0].ID)
 }

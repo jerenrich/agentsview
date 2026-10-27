@@ -333,6 +333,9 @@ func (s *Session) UnmarshalJSON(data []byte) error {
 //
 //nolint:recvcheck // Value encoding and pointer decoding intentionally implement distinct interfaces.
 type Session struct {
+	// TimingCapture is transient write metadata, never part of session JSON or reads.
+	TimingCapture *timingEvidenceRecord `json:"-"`
+
 	// WebURL is a client-derived browser link, never persisted.
 	WebURL                string   `json:"web_url,omitempty"`
 	ID                    string   `json:"id"`
@@ -1665,7 +1668,9 @@ func (db *DB) UpsertSession(ctx context.Context, s Session) error {
 }
 
 // UpsertSessionPendingContent inserts or updates the session row without
-// clearing source-missing state. Full content writers call
+// clearing source-missing state or publishing uncommitted timing evidence.
+// Full content writers prepare timing before this call and publish it only
+// after the normalized content write succeeds. They call
 // ClearSessionSourceMissing only after every required dependent write lands.
 // The returned bool reports whether the row was source-missing before the
 // upsert, so callers can replace rather than append its retained content.
@@ -1678,6 +1683,11 @@ func (db *DB) upsertSession(ctx context.Context,
 	s Session, reviveSourceMissing bool,
 ) (sessionUpsertResult, error) {
 	s = db.sessionForStorage(s)
+	if reviveSourceMissing {
+		s = db.prepareTimingEvidence(ctx, s)
+	} else {
+		s.TimingCapture = nil
+	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	writer := db.getWriter()
@@ -1789,6 +1799,13 @@ func upsertSessionExec(
 		}
 	}
 	result.sourceMissing = sourceMissingAt.Valid
+	var pendingTiming *timingReadSnapshot
+	if !reviveSourceMissing && (s.Agent == "codex" || s.Agent == "claude") {
+		pendingTiming, err = previousTimingReadSnapshot(ctx, queryRow, s.ID)
+		if err != nil {
+			return sessionUpsertResult{}, err
+		}
+	}
 
 	// data_version is intentionally NOT advanced here. The
 	// caller must call SetSessionDataVersion only after the
@@ -1808,6 +1825,25 @@ func upsertSessionExec(
 	if err != nil {
 		return sessionUpsertResult{},
 			fmt.Errorf("upserting session %s: %w", s.ID, err)
+	}
+	if err := writeTimingEvidence(ctx, exec, s.ID, s.TimingCapture); err != nil {
+		return sessionUpsertResult{}, err
+	}
+	if pendingTiming != nil {
+		if err := savePendingTimingRead(ctx, exec, s.ID, pendingTiming); err != nil {
+			return sessionUpsertResult{}, err
+		}
+	} else if err := clearPendingTimingRead(ctx, exec, s.ID); err != nil {
+		return sessionUpsertResult{}, err
+	}
+	if !reviveSourceMissing && (s.Agent == "codex" || s.Agent == "claude") {
+		// These full writes commit normalized content and timing separately. Keep
+		// an already-current row retryable even when publication later fails or the
+		// caller is cancelled after its source metadata has advanced.
+		if _, err := exec(ctx, `UPDATE sessions SET data_version=? WHERE id=? AND data_version>=?`,
+			max(CurrentDataVersion()-1, 0), s.ID, CurrentDataVersion()); err != nil {
+			return sessionUpsertResult{}, fmt.Errorf("marking pending timing content stale: %w", err)
+		}
 	}
 	parentChanged := !nullableStringEqual(previousParent, s.ParentSessionID)
 	if result.inserted || parentChanged || previousRelationship != s.RelationshipType {
@@ -3101,6 +3137,9 @@ type MessageTokenUsageUpdate struct {
 }
 
 type IncrementalSessionUpdate struct {
+	// TimingCapture is prepared before the writer lock and committed with the cursor.
+	TimingCapture *timingEvidenceRecord `json:"-"`
+
 	EndedAt                  *string
 	TerminationStatus        *string
 	MsgCount                 int
@@ -3361,7 +3400,10 @@ func updateSessionIncrementalTx(ctx context.Context,
 			"incremental update session %s: updated %d rows", id, rows,
 		)
 	}
-	return nil
+	if err := writeTimingEvidence(ctx, tx.ExecContext, id, update.TimingCapture); err != nil {
+		return err
+	}
+	return clearPendingTimingRead(ctx, tx.ExecContext, id)
 }
 
 // messageRangeTotals is what the rows at or after one ordinal contribute
@@ -3479,12 +3521,20 @@ func replaceSessionIncrementalTx(ctx context.Context,
 			"ranged replacement update session %s: updated %d rows", id, rows,
 		)
 	}
-	return nil
+	if err := writeTimingEvidence(ctx, tx.ExecContext, id, update.TimingCapture); err != nil {
+		return err
+	}
+	return clearPendingTimingRead(ctx, tx.ExecContext, id)
 }
 
 func (db *DB) UpdateSessionIncremental(ctx context.Context,
 	id string, update IncrementalSessionUpdate,
 ) error {
+	var err error
+	update, err = db.prepareIncrementalTiming(ctx, id, update)
+	if err != nil {
+		return err
+	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -5664,6 +5714,23 @@ func (db *DB) ResetAllMtimes(ctx context.Context) error {
 		return fmt.Errorf("beginning mtime reset tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Mtime is part of timing's source binding. Invalidate already-mismatched
+	// records first, so an old zero-mtime record cannot become valid by accident.
+	// Retain its payload for archive preservation, but do not trust its version.
+	if _, err := tx.ExecContext(ctx, `UPDATE session_timing_evidence SET version=0
+ WHERE version=? AND file_mtime<>COALESCE((
+  SELECT file_mtime FROM sessions WHERE id=session_timing_evidence.session_id
+ ),0)`, timingEvidenceVersion); err != nil {
+		return fmt.Errorf("invalidating stale timing mtimes: %w", err)
+	}
+	// Preserve currently valid evidence through the bookkeeping reset, including
+	// sessions whose logs no longer exist. Other binding fields stay unchanged.
+	if _, err := tx.ExecContext(ctx, `UPDATE session_timing_evidence
+ SET file_mtime=0 WHERE version=? AND file_mtime=COALESCE((
+  SELECT file_mtime FROM sessions WHERE id=session_timing_evidence.session_id
+ ),0)`, timingEvidenceVersion); err != nil {
+		return fmt.Errorf("resetting timing evidence mtimes: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx,
 		"UPDATE sessions SET file_mtime = 0",
 	); err != nil {

@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json/v2"
+	"fmt"
 	"strings"
 	"time"
 
+	"go.kenn.io/agentsview/internal/parser"
 	"go.kenn.io/agentsview/internal/stringutil"
 )
 
@@ -14,18 +16,26 @@ import (
 // All durations are in milliseconds. *int64 fields are null when the
 // underlying execution interval is unknown or incomplete.
 type SessionTiming struct {
-	SessionID       string          `json:"session_id"`
-	TotalDurationMs int64           `json:"total_duration_ms"`
-	ToolDurationMs  int64           `json:"tool_duration_ms"`
-	TurnCount       int             `json:"turn_count"`
-	ToolCallCount   int             `json:"tool_call_count"`
-	SubagentCount   int             `json:"subagent_count"`
-	SlowestCall     *CallTiming     `json:"slowest_call"`
-	ByCategory      []CategoryTotal `json:"by_category"`
-	Turns           []TurnTiming    `json:"turns"`
-	Running         bool            `json:"running"`
-	Activity        []TurnActivity  `json:"activity"`
-	ActivityTotals  ActivityTotals  `json:"activity_totals"`
+	Coverage TimingCoverage `json:"coverage" required:"false"`
+
+	// ModelTimingAvailable means at least one explicit model interval was recorded,
+	// including a zero-duration interval; it does not imply complete coverage.
+	ModelTimingAvailable bool            `json:"model_timing_available,omitzero"`
+	ActiveDurationMs     int64           `json:"active_duration_ms,omitzero"`
+	IdleDurationMs       int64           `json:"idle_duration_ms,omitzero"`
+	TimingSource         string          `json:"timing_source,omitempty"`
+	SessionID            string          `json:"session_id"`
+	TotalDurationMs      int64           `json:"total_duration_ms"`
+	ToolDurationMs       int64           `json:"tool_duration_ms"`
+	TurnCount            int             `json:"turn_count"`
+	ToolCallCount        int             `json:"tool_call_count"`
+	SubagentCount        int             `json:"subagent_count"`
+	SlowestCall          *CallTiming     `json:"slowest_call"`
+	ByCategory           []CategoryTotal `json:"by_category"`
+	Turns                []TurnTiming    `json:"turns"`
+	Running              bool            `json:"running"`
+	Activity             []TurnActivity  `json:"activity"`
+	ActivityTotals       ActivityTotals  `json:"activity_totals"`
 }
 
 type CategoryTotal struct {
@@ -44,6 +54,8 @@ type TurnTiming struct {
 }
 
 type CallTiming struct {
+	// DurationSource identifies execution, caller_wait, or subagent evidence.
+	DurationSource    string  `json:"duration_source,omitempty"`
 	ToolUseID         string  `json:"tool_use_id"`
 	ToolName          string  `json:"tool_name"`
 	Category          string  `json:"category"`
@@ -73,48 +85,108 @@ type TurnRow struct {
 // CallRow is the per-tool_call row returned by the per-call SQL query.
 // All backends pass raw execution evidence to AssembleTiming.
 type CallRow struct {
-	MessageID         int64
-	ToolUseID         string
-	ToolName          string
-	Category          string
-	SkillName         *string
-	SubagentSessionID *string
-	InputJSON         string
-	ExecutionStart    string
-	ExecutionEnd      string
-	SubagentStart     string
-	SubagentEnd       string
+	WaitStart, WaitEnd int64
+	HasWait            bool
+	MessageID          int64
+	ToolUseID          string
+	ToolName           string
+	Category           string
+	SkillName          *string
+	SubagentSessionID  *string
+	InputJSON          string
+	ExecutionStart     string
+	ExecutionEnd       string
+	SubagentStart      string
+	SubagentEnd        string
 }
 
 // GetSessionTiming computes the per-session timing summary. Returns
 // (nil, nil) when the session does not exist (mirrors GetSession's
 // contract; the HTTP handler turns this into a 404).
-func (db *DB) GetSessionTiming(
-	ctx context.Context, sessionID string,
-) (*SessionTiming, error) {
-	sess, err := db.GetSession(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	if sess == nil {
-		return nil, nil
-	}
-
-	turnRows, err := db.queryTurnRows(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	callRows, err := db.queryCallRows(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	return AssembleTiming(sess, turnRows, callRows, time.Now().UTC()), nil
+func (db *DB) GetSessionTiming(ctx context.Context, sessionID string) (*SessionTiming, error) {
+	return db.getSessionTiming(ctx, sessionID, nil)
 }
 
-func (db *DB) queryTurnRows(
-	ctx context.Context, sessionID string,
+// All archived inputs share one committed SQLite snapshot. Release it before
+// optional legacy source I/O so decompression cannot pin the archive WAL.
+func (db *DB) getSessionTiming(ctx context.Context, sessionID string, afterSession func()) (*SessionTiming, error) {
+	tx, err := db.getReader().BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("beginning timing snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	sess, err := scanSessionFullRow(tx.QueryRowContext(ctx, "SELECT "+sessionFullCols+" FROM sessions WHERE id=?", sessionID), sessionID)
+	if err != nil || sess == nil {
+		return nil, err
+	}
+	if sess.DeletedAt != nil {
+		return nil, nil
+	}
+	if afterSession != nil {
+		afterSession()
+	}
+	pending, committed, err := restorePendingTimingRead(ctx, tx, sess)
+	if err != nil {
+		return nil, err
+	}
+	endedAt := sess.EndedAt
+	if pending && !committed {
+		endedAt = nil
+	}
+	turns, err := queryTimingTurnRows(ctx, tx, sessionID, endedAt)
+	if err != nil {
+		return nil, err
+	}
+	if pending && !committed {
+		boundPendingTimingRead(sess, turns)
+	}
+	calls, err := queryTimingCallRows(ctx, tx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	var source *parser.SessionTimingEvidence
+	var rejected bool
+	if committed {
+		source, rejected, err = storedTimingEvidenceWithQuerier(ctx, tx, sess)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("closing timing snapshot: %w", err)
+	}
+	persisted := source != nil
+	if source == nil && !rejected && !pending {
+		// A saved rejection is authoritative for this source binding.
+		source, err = readOwnedTimingSource(ctx, sess, db.timingSourceChildren)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if pending {
+		// An in-flight import is not evidence of current runtime activity.
+		if source != nil {
+			copy := *source
+			copy.Open = false
+			source = &copy
+		}
+	} else {
+		source = timingEvidenceForLiveSource(sess, source)
+	}
+	out := assembleTiming(sess, turns, calls, time.Now().UTC(), !pending, source)
+	if persisted {
+		out.Coverage.Evidence = "persisted"
+	}
+	return out, nil
+}
+
+func queryTimingTurnRows(
+	ctx context.Context, q messageRowsQuerier, sessionID string, endedAt *string,
 ) ([]TurnRow, error) {
-	rows, err := db.getReader().QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT
 		  m2.id, m2.ordinal, m2.timestamp, m2.has_tool_use,
 		  CASE
@@ -133,7 +205,7 @@ func (db *DB) queryTurnRows(
 		        (julianday(
 		          COALESCE(
 		            LEAD(m.timestamp) OVER (ORDER BY m.ordinal),
-		            s.ended_at
+		            ?
 		          )
 		        ) - julianday(m.timestamp)) * 86400000
 		      ) AS INTEGER
@@ -143,7 +215,7 @@ func (db *DB) queryTurnRows(
 		  WHERE m.session_id = ?
 		) m2
 		ORDER BY m2.ordinal
-	`, sessionID)
+	`, endedAt, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -174,10 +246,10 @@ func (db *DB) queryTurnRows(
 	return out, rows.Err()
 }
 
-func (db *DB) queryCallRows(
-	ctx context.Context, sessionID string,
+func queryTimingCallRows(
+	ctx context.Context, q messageRowsQuerier, sessionID string,
 ) ([]CallRow, error) {
-	rows, err := db.getReader().QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT
 		  tc.message_id,
 		  tc.tool_use_id,
@@ -263,9 +335,15 @@ func (db *DB) queryCallRows(
 // SQLite and PostgreSQL backends. `now` is captured by the caller so
 // tests can be deterministic if needed.
 func AssembleTiming(
-	sess *Session, turns []TurnRow, calls []CallRow, now time.Time,
+	sess *Session, turns []TurnRow, calls []CallRow, now time.Time, evidence ...*parser.SessionTimingEvidence,
 ) *SessionTiming {
-	running := sess.EndedAt == nil || *sess.EndedAt == ""
+	return assembleTiming(sess, turns, calls, now, true, evidence...)
+}
+
+func assembleTiming(
+	sess *Session, turns []TurnRow, calls []CallRow, now time.Time, allowLive bool, evidence ...*parser.SessionTimingEvidence,
+) *SessionTiming {
+	running := allowLive && (sess.EndedAt == nil || *sess.EndedAt == "")
 
 	out := &SessionTiming{
 		SessionID:  sess.ID,
@@ -281,13 +359,21 @@ func AssembleTiming(
 		out.TotalDurationMs = millisBetween(
 			*sess.StartedAt, *sess.EndedAt,
 		)
-	default:
+	case allowLive:
 		out.TotalDurationMs = millisBetween(
 			*sess.StartedAt, now.Format(time.RFC3339),
 		)
 	}
 
-	intervals := assembleTurnActivity(out, sess, turns, calls, now)
+	var source *parser.SessionTimingEvidence
+	if len(evidence) > 0 {
+		source = evidence[0]
+	}
+	if allowLive && sourceTimingRunning(sess, turns, source, now) {
+		out.Running = true
+	}
+	calls = sourceTimedCalls(turns, calls, source)
+	intervals := assembleTurnActivity(out, sess, turns, calls, now, source)
 	callsByMsg := map[int64][]CallTiming{}
 	for i, r := range calls {
 		c := CallTiming{
@@ -301,10 +387,12 @@ func AssembleTiming(
 		if interval := intervals[i]; interval != nil {
 			v := interval.end - interval.start
 			c.DurationMs = &v
+			_, c.DurationSource, _ = measuredCallEvidence(r)
 		}
 		callsByMsg[r.MessageID] = append(callsByMsg[r.MessageID], c)
 	}
 
+	completedBoundaries := completedCallBoundaries(calls)
 	for _, t := range turns {
 		if !t.HasToolUse {
 			continue
@@ -314,7 +402,7 @@ func AssembleTiming(
 		if turnCalls == nil {
 			turnCalls = []CallTiming{}
 		}
-		if completedAt, ok := completedCallBoundary(calls, t.MessageID); ok {
+		if completedAt, ok := completedBoundaries[t.MessageID]; ok {
 			if start, valid := timingTimestamp(t.Timestamp); valid && completedAt >= start {
 				v := completedAt - start
 				t.DurationMs = &v
@@ -340,26 +428,61 @@ func AssembleTiming(
 			Calls:           turnCalls,
 		})
 	}
+	timingCoverage(out, sess, source, false)
 	return out
 }
 
-func completedCallBoundary(calls []CallRow, messageID int64) (int64, bool) {
-	var boundary int64
-	matched := false
+// EndedAt is the last observed source timestamp, not a completion marker.
+// An unfinished native turn is live only within the existing activity window.
+// Historical unfinished turns retain their observed bounds. Claude transcripts
+// without a stop reason also use the last visible final answer conservatively.
+func sourceTimingRunning(sess *Session, turns []TurnRow, source *parser.SessionTimingEvidence, now time.Time) bool {
+	if source == nil || !source.Open || len(source.Turns) == 0 || sess.Agent != "codex" && sess.Agent != "claude" {
+		return false
+	}
+	last := source.Turns[len(source.Turns)-1].End
+	if now.UnixMilli() < last || now.Sub(time.UnixMilli(last)) >= activeWindow {
+		return false
+	}
+	if sess.Agent == "claude" {
+		for i := len(turns) - 1; i >= 0; i-- {
+			row := turns[i]
+			if row.IsSystem || row.IsSystemPrefixed {
+				continue
+			}
+			if row.Role == "assistant" {
+				return row.HasToolUse
+			}
+			if row.Role == "user" {
+				return true
+			}
+		}
+	}
+	return true
+}
+
+// Resolve complete groups once; scanning every call again for every tool
+// message makes a large transcript quadratic.
+func completedCallBoundaries(calls []CallRow) map[int64]int64 {
+	boundaries := map[int64]int64{}
+	incomplete := map[int64]bool{}
 	for _, call := range calls {
-		if call.MessageID != messageID {
+		interval, ok := executionInterval(call)
+		if call.HasWait {
+			interval, ok = activityInterval{call.WaitStart, call.WaitEnd}, call.WaitEnd >= call.WaitStart
+		}
+		if !ok {
+			incomplete[call.MessageID] = true
 			continue
 		}
-		interval, ok := executionInterval(call)
-		if !ok {
-			return 0, false
+		if current, found := boundaries[call.MessageID]; !found || interval.end > current {
+			boundaries[call.MessageID] = interval.end
 		}
-		if !matched || interval.end > boundary {
-			boundary = interval.end
-		}
-		matched = true
 	}
-	return boundary, matched
+	for id := range incomplete {
+		delete(boundaries, id)
+	}
+	return boundaries
 }
 
 func primaryTimingCategory(calls []CallTiming) string {
@@ -386,7 +509,7 @@ func millisBetween(a, b string) int64 {
 	if err != nil {
 		return 0
 	}
-	return tb.Sub(ta).Milliseconds()
+	return max(0, tb.UnixMilli()-ta.UnixMilli())
 }
 
 // makeInputPreview returns a short snippet of the tool's input args,

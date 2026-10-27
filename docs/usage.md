@@ -961,11 +961,11 @@ The panel contains these sections, including experimental Recall when available:
     from the current session. Evidence-range links jump to the supporting
     transcript message. An empty state appears when the local archive has no
     matching entries.
-- **Turn activity** — each visible user prompt starts a window that ends at the
-    next prompt or the session boundary. Bars separate measured tool execution
-    from unattributed time, which has no measured phase boundaries. Thinking
-    and response generation are not measured. Click a row to jump to its prompt
-    in the transcript.
+- **Turn activity** — active time split into recorded model activity, tool
+    waiting, and unattributed time. Local Codex lifecycle events define turn
+    boundaries, including resumed work before a visible prompt. Gaps between
+    turns are excluded. Claude uses prompt-to-final-assistant windows. Click
+    a row to jump to the nearest transcript message.
 - **Time spent** — per-category aggregate bars across the normalized taxonomy
     (`Read`, `Edit`, `Write`, `Bash`, `Grep`, `Glob`, `Task`, `Tool`, `Other`,
     and other provider categories). Click a row to filter the rest of the panel
@@ -980,14 +980,49 @@ The panel contains these sections, including experimental Recall when available:
 
 ![Vital Signs panel detail](/docs/assets/generated/screenshots/vital-signs-panel.png)
 
-Tool durations come from paired execution events or a closed linked child
-session. A call without either source shows `unknown`; the summary and category
-totals show **Not measured** when no calls have measured durations. A measured
-zero remains `0ms`. Categories remain available as filters even without timing.
-An open child needs a completed execution interval before its call can show a
-duration; otherwise it stays unknown until the child closes.
+Available local Codex logs (`.jsonl` or `.jsonl.zst`) and Claude logs add timing
+without changing the archive. Model time uses recorded reasoning and response
+intervals; it is client-observed activity, not server inference telemetry. Tool
+waiting uses matched request/result timestamps and can include dispatch and
+approval waits. Tool waits take precedence where model intervals overlap them.
+Parallel intervals count once. The remaining active time is unattributed.
+Abandoned Codex turns stop at their last observed assistant or tool activity; a
+later task never stretches them across an idle gap. Ambiguous reused call IDs
+remain unmeasured. Aggregate and category totals use the same active windows as
+the activity rows; individual call durations retain their original evidence.
+Missing or unsupported sources retain archive-only timing, with model time
+unmeasured. Readable sources without model intervals also show **Not measured**,
+rather than implying zero model work. The panel labels archive-derived activity
+windows as estimates: missing completion records can still include idle time. Individual call duration tooltips identify
+recorded execution, request-to-result waiting, or a linked subagent lifetime. Forked and subagent sources use that fallback to avoid mixing replayed
+parent activity into child sessions. This includes Claude transcripts that also
+hold an in-file fork or a replayed parent prefix: neither the main session nor
+the fork receives whole-file timing. While a source is available and its last
+activity is less than ten minutes old, the newest unfinished turn keeps running
+until now, including a Claude prompt that has no response yet. This live elapsed
+time is provisional; completed, stale, or source-deleted sessions use recorded
+bounds. Quiet live snapshots are rechecked every thirty seconds while the
+sessions view is active. The clock pauses during checks; a stalled request times
+out after thirty seconds and can retry without losing the last snapshot.
+Leaving the sessions view stops polling. Returning checks the cached session
+again before its live clock advances.
 
-Session tool and category totals count only time within the session boundaries.
+Individual calls prefer explicit execution endpoints or a closed linked child;
+paired request/result latency supplies a duration when execution is unavailable.
+Consequently a call's execution duration can be shorter than its contribution to
+aggregate tool waiting. Unmeasured calls show `unknown`; a measured zero remains
+`0ms`. Categories remain available as filters without timing.
+
+**Unreleased:** Codex command and MCP calls can also use a completed execution
+item's explicit start and end timestamps when its ID matches the recorded call.
+Execution time remains unknown for older records without both timestamps and
+nested code-mode executions whose IDs do not match an outer call. Matched caller
+latency may still be available. Message gaps and tool-output delivery times are
+not used as execution boundaries. Available Codex-format sources are
+reparsed on upgrade; sessions whose sources are missing keep their stored data.
+
+Session tool and category totals count only time within active source turn
+boundaries when available, otherwise within the archived session boundaries.
 Individual calls retain their full measured durations, including any time
 outside the parent session. Overlapping calls count once in the session total
 and once per category, so category totals can overlap each other.

@@ -3,7 +3,9 @@ package db
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -90,6 +92,86 @@ func TestValidateDataVersionScopes(t *testing.T) {
 	}
 }
 
+func TestTimingUpgradeIncludesUpstreamAndPreviewVersions(t *testing.T) {
+	// Both upstream archives and timing previews used 148-151. Every affected
+	// provider must be retried even when a preview stamped its row as current.
+	agents := []parser.AgentType{parser.AgentCodex, parser.AgentTraeX, parser.AgentAugureCode, parser.AgentClaude, parser.AgentCommandCode, parser.AgentCowork, parser.AgentQoder, parser.AgentIcodemate}
+	for _, previous := range []int{147, 148, 149, 150, 151} {
+		t.Run(strconv.Itoa(previous), func(t *testing.T) {
+			d := testDB(t)
+			for _, agent := range append(slices.Clone(agents), parser.AgentHermes) {
+				insertSession(t, d, string(agent), "project", func(s *Session) {
+					s.Agent = string(agent)
+					s.SourceSessionID = "native-" + string(agent)
+				})
+				require.NoError(t, d.SetSessionDataVersion(t.Context(), string(agent), previous))
+				timingInsertMessage(t, d, string(agent), 0, "user", "retained without a source log", "2026-04-26T10:00:00Z", false)
+			}
+			ids := make(map[string]int64)
+			for _, agent := range append(slices.Clone(agents), parser.AgentHermes) {
+				ids[string(agent)] = timingMsgID(t, d, string(agent), 0)
+			}
+			require.NoError(t, d.Update(t.Context(), func(tx *sql.Tx) error {
+				return writeUserVersion(t.Context(), tx, previous)
+			}))
+			path := d.Path()
+			require.NoError(t, d.Close())
+			upgraded, err := OpenIsolated(t.Context(), path)
+			require.NoError(t, err)
+			defer upgraded.Close()
+			assert.False(t, upgraded.NeedsResync(), "scoped upgrades must not replace the archive")
+			for _, agent := range agents {
+				assert.Equal(t, previous, upgraded.GetSessionDataVersion(t.Context(), string(agent)), "provider %s needs a reparse", agent)
+			}
+			assert.Equal(t, CurrentDataVersion(), upgraded.GetSessionDataVersion(t.Context(), "hermes"))
+			for id, messageID := range ids {
+				assert.Equal(t, messageID, timingMsgID(t, upgraded, id, 0), "missing sources must not discard message identities")
+				var native string
+				require.NoError(t, upgraded.getReader().QueryRowContext(t.Context(), "SELECT source_session_id FROM sessions WHERE id=?", id).Scan(&native))
+				assert.Equal(t, "native-"+id, native)
+			}
+		})
+	}
+}
+
+func TestTimingRepairUpgradePreservesRetainedArchive(t *testing.T) {
+	const previous = 153
+	assert.ElementsMatch(t, []parser.AgentType{parser.AgentClaude, parser.AgentCodex},
+		ScopedDataVersionProviders(previous, previous+1))
+	d := testDB(t)
+	s := archivedTimingFixture(t, d)
+	require.NoError(t, d.UpsertSession(t.Context(), s))
+	before, err := d.GetSessionTiming(t.Context(), s.ID)
+	require.NoError(t, err)
+	require.Equal(t, "persisted", before.Coverage.Evidence)
+	messageID := timingMsgID(t, d, s.ID, 0)
+	require.NoError(t, os.Remove(*s.FilePath))
+	require.NoError(t, d.SetSessionDataVersion(t.Context(), s.ID, previous))
+	for _, agent := range []string{"claude", "hermes", "traex"} {
+		insertSession(t, d, agent, "project", func(s *Session) { s.Agent = agent })
+		require.NoError(t, d.SetSessionDataVersion(t.Context(), agent, previous))
+	}
+	require.NoError(t, d.Update(t.Context(), func(tx *sql.Tx) error {
+		return writeUserVersion(t.Context(), tx, previous)
+	}))
+	path := d.Path()
+	require.NoError(t, d.Close())
+	upgraded, err := OpenIsolated(t.Context(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
+	assert.False(t, upgraded.NeedsResync(), "repair must not rebuild the archive")
+	for _, id := range []string{s.ID, "claude"} {
+		assert.Equal(t, previous, upgraded.GetSessionDataVersion(t.Context(), id))
+	}
+	for _, id := range []string{"hermes", "traex"} {
+		assert.Equal(t, CurrentDataVersion(), upgraded.GetSessionDataVersion(t.Context(), id))
+	}
+	assert.Equal(t, messageID, timingMsgID(t, upgraded, s.ID, 0))
+	after, err := upgraded.GetSessionTiming(t.Context(), s.ID)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "missing source logs must retain archived timing")
+}
+
 func TestAdvanceScopedDataVersion(t *testing.T) {
 	t.Cleanup(InstallDataVersionScopesForTest(map[int][]parser.AgentType{131: {parser.AgentCodebuff}}))
 	for _, rollback := range []bool{false, true} {
@@ -151,4 +233,12 @@ func TestAdvanceScopedDataVersion(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRepeatedQueueTimingUpgradeScopesOnlyClaude(t *testing.T) {
+	assert.Equal(t, []parser.AgentType{parser.AgentClaude}, ScopedDataVersionProviders(154, 155))
+}
+
+func TestCompoundPromptTimingUpgradeScopesOnlyClaude(t *testing.T) {
+	assert.Equal(t, []parser.AgentType{parser.AgentClaude}, ScopedDataVersionProviders(155, 156))
 }

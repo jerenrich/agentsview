@@ -794,6 +794,11 @@ func (db *DB) upsertSessionWithProjectIdentity(ctx context.Context,
 	reviveSourceMissing bool,
 ) (sessionUpsertResult, error) {
 	s = db.sessionForStorage(s)
+	if reviveSourceMissing {
+		s = db.prepareTimingEvidence(ctx, s)
+	} else {
+		s.TimingCapture = nil
+	}
 	if err := db.requireWritable(); err != nil {
 		return sessionUpsertResult{}, err
 	}

@@ -87,6 +87,7 @@ afterEach(() => {
     unmount(component);
     component = undefined;
   }
+  sessionTiming.reset();
   vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -254,7 +255,9 @@ describe("App session URL date state", () => {
     const cancelRouteReads = vi.spyOn(sessions, "cancelRouteReads");
     const loadMessages = vi.spyOn(messages, "loadSession").mockResolvedValue();
     const cancelMessages = vi.spyOn(messages, "cancelInFlight");
-    vi.spyOn(sessionTiming, "load").mockResolvedValue();
+    const pauseTiming = vi.spyOn(sessionTiming, "pause");
+    const resumeTiming = vi.spyOn(sessionTiming, "resume");
+    const loadTiming = vi.spyOn(sessionTiming, "load").mockResolvedValue();
     vi.spyOn(pins, "loadForSession").mockResolvedValue();
     vi.spyOn(usage, "fetchAll").mockResolvedValue();
 
@@ -268,10 +271,15 @@ describe("App session URL date state", () => {
     await flushEffects();
     expect(cancelRouteReads).toHaveBeenCalled();
     expect(cancelMessages).toHaveBeenCalled();
+    expect(pauseTiming).toHaveBeenCalled();
+    expect(sessionTiming.pollingPaused).toBe(true);
 
     router.navigateToSession("session-1");
     await flushEffects();
     expect(loadMessages).toHaveBeenCalledTimes(2);
+    expect(resumeTiming).toHaveBeenLastCalledWith("session-1");
+    expect(loadTiming).toHaveBeenLastCalledWith("session-1", true);
+    expect(sessionTiming.pollingPaused).toBe(false);
   });
 
   it("retries missing metadata when returning to the same session", async () => {

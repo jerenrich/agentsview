@@ -71,6 +71,13 @@ import { m } from "../../i18n/index.js";
 import SessionVitals from "./SessionVitals.svelte";
 import { requestUrl } from "../../test-support/request-url.js";
 
+// Flush transport completion as well as Svelte's rendering work.
+async function flushTiming() {
+  await tick();
+  await Promise.resolve();
+  await tick();
+}
+
 describe("SessionVitals", () => {
   let component: ReturnType<typeof mount> | undefined;
 
@@ -110,6 +117,119 @@ describe("SessionVitals", () => {
     vi.unstubAllGlobals();
   });
 
+  it("bounds the visible active total while refresh requests remain stalled", async () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-04-26T10:00:00Z");
+    vi.setSystemTime(start);
+    try {
+      const timing = timingWithCall();
+      timing.running = true;
+      timing.total_duration_ms = 1000;
+      timing.active_duration_ms = 1000;
+      timing.activity = [
+        {
+          message_id: 1,
+          ordinal: 0,
+          started_at: new Date(start - 1000).toISOString(),
+          duration_ms: 1000,
+          tool_ms: 0,
+          unattributed_ms: 1000,
+          running: true,
+        },
+      ];
+      mocks.fetchSessionTiming
+        .mockReset()
+        .mockResolvedValueOnce(timing)
+        .mockImplementation(() => new Promise(() => {}));
+      component = mount(SessionVitals, {
+        target: document.body,
+        props: { sessionId: "sess-1", session: undefined },
+      });
+      await flushTiming();
+      await vi.advanceTimersByTimeAsync(20 * 60000);
+      await tick();
+      expect(mocks.fetchSessionTiming.mock.calls.length).toBeGreaterThan(2);
+      expect(document.querySelector(".activity-section .v-meta")?.textContent).toBe(
+        "Active · 31.0s",
+      );
+    } finally {
+      sessionTiming.reset();
+      await tick();
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers after a transient quiet-session refresh failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const timing = timingWithCall();
+      timing.running = true;
+      timing.activity = [
+        {
+          message_id: 1,
+          ordinal: 0,
+          started_at: new Date(Date.now() - 1000).toISOString(),
+          duration_ms: 1000,
+          tool_ms: 0,
+          unattributed_ms: 1000,
+          running: true,
+        },
+      ];
+      mocks.fetchSessionTiming
+        .mockReset()
+        .mockResolvedValueOnce(timing)
+        .mockRejectedValueOnce(new Error("503 Service Unavailable"))
+        .mockResolvedValue(timing);
+      component = mount(SessionVitals, {
+        target: document.body,
+        props: { sessionId: "sess-1", session: traceSession },
+      });
+      await flushTiming();
+      expect(sessionTiming.timing?.running).toBe(true);
+      await vi.advanceTimersByTimeAsync(90000);
+      await tick();
+      expect(mocks.fetchSessionTiming.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect(sessionTiming.timing).not.toBeNull();
+    } finally {
+      sessionTiming.reset();
+      await tick();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps live timeline marks aligned with the advancing axis", async () => {
+    const startMs = Date.now() - 5000;
+    const timing = timingWithCall();
+    timing.running = true;
+    timing.total_duration_ms = 5000;
+    timing.active_duration_ms = 5000;
+    timing.turns[0]!.started_at = new Date(startMs + 1000).toISOString();
+    timing.turns[0]!.duration_ms = null;
+    timing.activity = [
+      {
+        message_id: 1,
+        ordinal: 0,
+        started_at: new Date(startMs).toISOString(),
+        duration_ms: 5000,
+        tool_ms: 0,
+        unattributed_ms: 5000,
+        running: true,
+      },
+    ];
+    mocks.fetchSessionTiming.mockResolvedValue(timing);
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await flushTiming();
+    liveTick.now = startMs + 15000;
+    await tick();
+    expect(document.querySelector(".scale-axis")?.textContent).toContain("7.5s");
+    const mark = document.querySelector<HTMLButtonElement>(".lane-mark")!;
+    expect(parseFloat(mark.style.left)).toBeCloseTo((1000 / 15000) * 100);
+    expect(parseFloat(mark.style.width)).toBeCloseTo((14000 / 15000) * 100);
+  });
+
   it.each([
     { duration: null, label: "Not measured" },
     { duration: 0, label: "0ms" },
@@ -125,8 +245,7 @@ describe("SessionVitals", () => {
         target: document.body,
         props: { sessionId: "sess-1", session: traceSession },
       });
-      await tick();
-      await tick();
+      await flushTiming();
 
       expect(document.querySelectorAll(".stat-grid .val")[1]?.textContent?.trim()).toBe(label);
       const category = [...document.querySelectorAll<HTMLButtonElement>(".agg-row")].find(
@@ -178,14 +297,13 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     const row = document.querySelector<HTMLButtonElement>(".activity-row");
     expect(row?.getAttribute("aria-label")).toBe("Turn 1 · 6.0s");
     expect(
       [...row!.querySelectorAll(".activity-track > span")].map((el) => el.getAttribute("title")),
-    ).toEqual(["Tool execution · 2.0s", "Unattributed · 4.0s"]);
+    ).toEqual(["Recorded model · 0ms", "Tool waiting · 2.0s", "Unattributed · 4.0s"]);
     expect(
       parseFloat(row!.querySelector<HTMLElement>('[data-activity-kind="tool"]')!.style.width),
     ).toBeCloseTo(33.3333);
@@ -224,6 +342,217 @@ describe("SessionVitals", () => {
     scroll.mockRestore();
   });
 
+  it.each([
+    { source: "source", expected: "Recorded reasoning" },
+    { source: "", expected: "estimated from archived messages" },
+  ])("explains $source boundary evidence", async ({ source, expected }) => {
+    mocks.fetchSessionTiming.mockResolvedValue({ ...mocks.timing, timing_source: source });
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await flushTiming();
+    expect(document.querySelector(".activity-section .activity-hint")?.textContent).toContain(
+      expected,
+    );
+  });
+
+  it("navigates a reused call ID to its actual message", async () => {
+    const timing = timingWithCall();
+    const first = timing.turns[0]!;
+    timing.turns.push({
+      ...first,
+      message_id: 2,
+      ordinal: 17,
+      calls: [{ ...first.calls[0]!, duration_ms: 900 }],
+    });
+    timing.slowest_call = { ...timing.turns[1]!.calls[0]! };
+    mocks.fetchSessionTiming.mockResolvedValue(timing);
+    const scroll = vi.spyOn(ui, "scrollToOrdinal");
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: traceSession },
+    });
+    await flushTiming();
+    document.querySelector<HTMLButtonElement>(".stat-grid .val-link")!.click();
+    expect(scroll).toHaveBeenCalledWith(17);
+    scroll.mockRestore();
+  });
+
+  it("shows model timing as unmeasured when readable logs contain no model intervals", async () => {
+    mocks.fetchSessionTiming.mockResolvedValue({
+      ...mocks.timing,
+      timing_source: "source",
+      active_duration_ms: 1000,
+      activity_totals: { tool_ms: 0, unattributed_ms: 1000 },
+    });
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await flushTiming();
+    expect(document.querySelector(".activity-totals")?.textContent).toContain(
+      "Recorded model · Not measured",
+    );
+  });
+
+  it.each([
+    { source: "execution", label: "Recorded execution" },
+    { source: "caller_wait", label: "Request-to-result waiting, including dispatch and approvals" },
+    { source: "subagent", label: "Linked subagent lifetime" },
+  ])("identifies $source duration evidence", async ({ source, label }) => {
+    const timing = timingWithCall();
+    timing.turns[0]!.calls[0]!.duration_ms = 1000;
+    timing.turns[0]!.calls[0]!.duration_source = source;
+    mocks.fetchSessionTiming.mockResolvedValue(timing);
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await flushTiming();
+    expect(document.querySelector(".calls .cd")?.getAttribute("title")).toBe(label);
+  });
+
+  it.each(["session metadata", "activity fallback", "invalid metadata", "other session metadata"])(
+    "places tool turns after preceding model work using %s",
+    async (origin) => {
+      const timing = timingWithCall();
+      timing.total_duration_ms = 60000;
+      timing.turns[0]!.started_at = "2026-07-14T12:00:30Z";
+      timing.turns[0]!.duration_ms = 10000;
+      if (origin !== "session metadata") {
+        timing.activity = [
+          {
+            message_id: 10,
+            ordinal: 0,
+            started_at: "2026-07-14T12:00:00Z",
+            duration_ms: 60000,
+            tool_ms: 0,
+            unattributed_ms: 60000,
+            running: false,
+          },
+        ];
+      }
+      const session =
+        origin === "activity fallback"
+          ? undefined
+          : {
+              ...traceSession,
+              ...(origin === "invalid metadata" ? { started_at: "invalid" } : {}),
+              ...(origin === "other session metadata"
+                ? { id: "another-session", started_at: "2026-07-14T11:00:00Z" }
+                : {}),
+            };
+      mocks.fetchSessionTiming.mockResolvedValue(timing);
+      component = mount(SessionVitals, {
+        target: document.body,
+        props: { sessionId: "sess-1", session },
+      });
+      await flushTiming();
+
+      const mark = document.querySelector<HTMLElement>(".lane-row .lane-mark")!;
+      expect(mark.style.left).toBe("50%");
+      expect(Number.parseFloat(mark.style.width)).toBeCloseTo(100 / 6);
+    },
+  );
+
+  it("renders model, tool and unattributed time without idle gaps", async () => {
+    mocks.fetchSessionTiming.mockResolvedValue({
+      ...mocks.timing,
+      total_duration_ms: 66000,
+      active_duration_ms: 6000,
+      idle_duration_ms: 60000,
+      activity_totals: { model_ms: 3000, tool_ms: 2000, unattributed_ms: 1000 },
+      activity: [
+        {
+          message_id: 10,
+          ordinal: 0,
+          started_at: "2026-07-14T12:00:00Z",
+          duration_ms: 6000,
+          model_ms: 3000,
+          tool_ms: 2000,
+          unattributed_ms: 1000,
+          running: false,
+        },
+      ],
+    });
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await flushTiming();
+    const row = document.querySelector<HTMLButtonElement>(".activity-row")!;
+    expect(row.getAttribute("aria-label")).toBe("Turn 1 · 6.0s");
+    expect(row.querySelector<HTMLElement>('[data-activity-kind="model"]')!.style.width).toBe("50%");
+    expect(document.querySelector(".activity-totals")?.textContent).toContain(
+      "Recorded model · 3.0s",
+    );
+    expect(document.querySelector(".activity-section")?.textContent).toContain("Active · 6.0s");
+    expect(document.querySelector(".activity-section")?.textContent).toContain(
+      "Idle excluded · 1m 0s",
+    );
+  });
+
+  it.each([
+    ["persisted", "Activity timing archived"],
+    ["source", "Activity timing from source log"],
+    ["unavailable", "Source activity timing unavailable"],
+  ])("shows timing coverage for %s evidence", async (evidence, label) => {
+    mocks.fetchSessionTiming.mockResolvedValue({
+      ...mocks.timing,
+      coverage: {
+        evidence,
+        version: 1,
+        turn_boundaries: "recorded",
+        recorded_turns: 2,
+        model_intervals: 3,
+        tool_calls: 5,
+        timed_tool_calls: 2,
+        execution_calls: 1,
+        caller_wait_calls: 1,
+        subagent_calls: 0,
+        unattributed_ms: 1000,
+      },
+    });
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await flushTiming();
+    const coverage = document.querySelector("[data-timing-coverage]");
+    expect(coverage?.textContent).toContain(label);
+    expect(coverage?.textContent).toContain("Model intervals: 3");
+    expect(coverage?.textContent).toContain("Timed tool calls: 2/5");
+  });
+
+  it("renders resumed turns sharing a navigation anchor", async () => {
+    const activity = {
+      message_id: 1,
+      ordinal: 0,
+      duration_ms: 1000,
+      tool_ms: 0,
+      model_ms: 500,
+      unattributed_ms: 500,
+      running: false,
+    };
+    mocks.fetchSessionTiming.mockResolvedValue({
+      ...mocks.timing,
+      activity: [
+        { ...activity, started_at: "2026-07-14T12:00:00Z" },
+        { ...activity, started_at: "2026-07-14T12:01:00Z" },
+      ],
+    });
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await flushTiming();
+    expect(document.querySelectorAll(".activity-row")).toHaveLength(2);
+    expect(document.querySelector(".activity-totals")?.textContent).toContain(
+      "Recorded model · 1.0s",
+    );
+  });
+
   it("keeps a running unsupported window fully unattributed", async () => {
     mocks.fetchSessionTiming.mockResolvedValue({
       ...mocks.timing,
@@ -246,8 +575,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     expect(
       document.querySelector<HTMLElement>('[data-activity-kind="unattributed"]')?.style.width,
@@ -255,6 +583,97 @@ describe("SessionVitals", () => {
     expect(document.querySelector<HTMLElement>('[data-activity-kind="tool"]')?.style.width).toBe(
       "0%",
     );
+  });
+
+  it.each([3000, undefined])(
+    "advances the active header with unfinished activity (%s)",
+    async (activeDurationMs) => {
+      const startMs = Date.now() - 1000;
+      mocks.fetchSessionTiming.mockResolvedValue({
+        ...mocks.timing,
+        active_duration_ms: activeDurationMs,
+        total_duration_ms: 63000,
+        idle_duration_ms: 60000,
+        running: true,
+        activity_totals: { tool_ms: 0, unattributed_ms: 3000 },
+        activity: [
+          {
+            message_id: 1,
+            ordinal: 0,
+            started_at: new Date(startMs - 62000).toISOString(),
+            duration_ms: 2000,
+            tool_ms: 0,
+            unattributed_ms: 2000,
+            running: false,
+          },
+          {
+            message_id: 2,
+            ordinal: 1,
+            started_at: new Date(startMs).toISOString(),
+            duration_ms: 1000,
+            tool_ms: 0,
+            unattributed_ms: 1000,
+            running: true,
+          },
+        ],
+      });
+      component = mount(SessionVitals, {
+        target: document.body,
+        props: { sessionId: "sess-1", session: undefined },
+      });
+      await flushTiming();
+
+      liveTick.now = startMs + 61000;
+      await tick();
+
+      const rows = document.querySelectorAll(".activity-row");
+      expect(rows[0]?.getAttribute("aria-label")).toBe("Turn 1 · 2.0s");
+      expect(rows[1]?.getAttribute("aria-label")).toBe("Turn 2 · 1m 1s");
+      expect(document.querySelector(".activity-section .v-meta")?.textContent).toBe(
+        "Active · 1m 3s",
+      );
+      expect(document.querySelector(".v-section .v-meta")?.textContent).toBe("running 2m 3s+");
+      expect(document.querySelector(".activity-totals")?.textContent).toContain(
+        "Unattributed · 1m 3s",
+      );
+      expect(document.querySelector(".activity-section")?.textContent).toContain(
+        "Idle excluded · 1m 0s",
+      );
+    },
+  );
+
+  it("keeps completed activity and its active header unchanged as live time advances", async () => {
+    const startMs = Date.now() - 1000;
+    mocks.fetchSessionTiming.mockResolvedValue({
+      ...mocks.timing,
+      active_duration_ms: 2000,
+      running: false,
+      activity_totals: { tool_ms: 0, unattributed_ms: 2000 },
+      activity: [
+        {
+          message_id: 1,
+          ordinal: 0,
+          started_at: new Date(startMs).toISOString(),
+          duration_ms: 2000,
+          tool_ms: 0,
+          unattributed_ms: 2000,
+          running: false,
+        },
+      ],
+    });
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await flushTiming();
+
+    liveTick.now = startMs + 61000;
+    await tick();
+
+    expect(document.querySelector(".activity-row")?.getAttribute("aria-label")).toBe(
+      "Turn 1 · 2.0s",
+    );
+    expect(document.querySelector(".activity-section .v-meta")?.textContent).toBe("Active · 2.0s");
   });
 
   it("updates a running activity from live time", async () => {
@@ -280,8 +699,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     liveTick.now = startMs + 5000;
     await tick();
@@ -290,7 +708,7 @@ describe("SessionVitals", () => {
     expect(row?.getAttribute("aria-label")).toBe("Turn 1 · 5.0s");
     expect(
       [...row!.querySelectorAll(".activity-track > span")].map((el) => el.getAttribute("title")),
-    ).toEqual(["Tool execution · 1.0s", "Unattributed · 4.0s"]);
+    ).toEqual(["Recorded model · 0ms", "Tool waiting · 1.0s", "Unattributed · 4.0s"]);
     expect(row!.querySelector<HTMLElement>('[data-activity-kind="tool"]')!.style.width).toBe("20%");
     expect(
       row!.querySelector<HTMLElement>('[data-activity-kind="unattributed"]')!.style.width,
@@ -305,8 +723,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     const closeButton = document.querySelector<HTMLButtonElement>(
       `button[aria-label="${m.session_vitals_close()}"]`,
@@ -326,8 +743,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: traceSession.id, session: traceSession },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     const rows = document.querySelectorAll(".context-row");
     expect(rows).toHaveLength(2);
@@ -391,8 +807,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: traceSession.id, session: traceSession },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     const worktreeValue = document.querySelector<HTMLElement>(".context-value--path");
     expect(worktreeValue).not.toBeNull();
@@ -428,8 +843,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: traceSession.id, session: traceSession },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     const repositoryCopy = document.querySelector<HTMLButtonElement>(
       `button[aria-label="${m.session_vitals_copy_repository()}"]`,
@@ -601,8 +1015,7 @@ describe("SessionVitals", () => {
       target: document.body,
       props: { sessionId: "sess-1", session: undefined },
     });
-    await tick();
-    await tick();
+    await flushTiming();
 
     const disclosure = document.querySelector<HTMLButtonElement>('button[aria-expanded="true"]');
     expect(disclosure).not.toBeNull();

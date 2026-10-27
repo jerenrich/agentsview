@@ -55,6 +55,7 @@
   ));
   let toolTimeMeasured = $derived(timing?.tool_call_count === 0 || measuredCategories.size > 0);
   let activityKinds: { kind: ActivityKind; label: string }[] = $derived([
+    { kind: "model", label: m.session_vitals_activity_model() },
     { kind: "tool", label: m.session_vitals_activity_tool() },
     { kind: "unattributed", label: m.session_vitals_activity_unattributed() },
   ]);
@@ -201,15 +202,35 @@
     return Math.max(activity.duration_ms, liveTick.now - start, 0);
   }
 
+  let activeDurationMs = $derived.by(() => {
+    if (!timing) return 0;
+    const snapshotDuration = timing.active_duration_ms ?? timing.activity.reduce(
+      (sum, activity) => sum + activity.duration_ms,
+      0,
+    );
+    return snapshotDuration + timing.activity.reduce(
+      (sum, activity) => sum + activityDuration(activity) - activity.duration_ms,
+      0,
+    );
+  });
+
+  let totalDurationMs = $derived.by(() => {
+    if (!timing) return 0;
+    const snapshotActive = timing.active_duration_ms ?? timing.activity.reduce(
+      (sum, activity) => sum + activity.duration_ms, 0,
+    );
+    return timing.total_duration_ms + Math.max(0, activeDurationMs - snapshotActive);
+  });
+
   function activityValue(
     activity: TurnActivity,
     kind: ActivityKind,
     durationMs: number,
   ): number {
-    if (kind !== "unattributed") return activity[`${kind}_ms`];
+    if (kind !== "unattributed") return activity[`${kind}_ms`] ?? 0;
     return Math.max(
       0,
-      durationMs - activity.tool_ms,
+      durationMs - activity.tool_ms - (activity.model_ms ?? 0),
     );
   }
 
@@ -225,9 +246,10 @@
 
   function turnForCall(call: CallTiming): TurnTiming | undefined {
     if (!timing) return undefined;
-    return timing.turns.find((t) =>
-      t.calls.some((c) => c.tool_use_id === call.tool_use_id),
-    );
+    const direct = timing.turns.find((turn) => turn.calls.includes(call));
+    if (direct) return direct;
+    const matches = timing.turns.filter((turn) => turn.calls.some((candidate) => candidate.tool_use_id === call.tool_use_id));
+    return matches.length === 1 ? matches[0] : undefined;
   }
 
   function scrollToCall(call: CallTiming) {
@@ -236,20 +258,24 @@
   }
 
   // Cache the largest measured call once per timing snapshot.
-  const maxCallMsCache = new WeakMap<SessionTiming, number>();
+  const maxCallCache = new WeakMap<SessionTiming, CallTiming | null>();
 
-  function maxCallMs(t: SessionTiming): number {
-    const cached = maxCallMsCache.get(t);
-    if (cached !== undefined) return cached;
-    let max = 0;
+  function longestCall(t: SessionTiming): CallTiming | null {
+    if (maxCallCache.has(t)) return maxCallCache.get(t)!;
+    let longest: CallTiming | null = null;
     for (const turn of t.turns) {
       for (const call of turn.calls) {
-        const d = call.duration_ms ?? 0;
-        if (d > max) max = d;
+        if (call.duration_ms != null && (longest == null || call.duration_ms > longest.duration_ms!)) longest = call;
       }
     }
-    maxCallMsCache.set(t, max);
-    return max;
+    maxCallCache.set(t, longest);
+    return longest;
+  }
+
+  let slowestCall = $derived(timing ? longestCall(timing) : null);
+
+  function maxCallMs(t: SessionTiming): number {
+    return longestCall(t)?.duration_ms ?? 0;
   }
 
   function callBarPct(c: CallTiming, t: SessionTiming): number {
@@ -265,13 +291,26 @@
   // window includes any in-flight running time so live marks reach the
   // right edge of the track.
   let sessionStartMs = $derived.by(() => {
-    if (!timing || timing.turns.length === 0) return 0;
-    return new Date(timing.turns[0]!.started_at).getTime();
+    if (!timing) return 0;
+    let start = Infinity;
+    if (session?.id === timing.session_id && session.started_at) {
+      const timestamp = new Date(session.started_at).getTime();
+      if (Number.isFinite(timestamp)) start = timestamp;
+    }
+    // Prompt/model work can precede the first tool-call turn. Source activity
+    // also provides an origin while sidebar session metadata is still loading.
+    for (const rows of [timing.activity, timing.turns]) {
+      for (const row of rows) {
+        const timestamp = new Date(row.started_at).getTime();
+        if (Number.isFinite(timestamp)) start = Math.min(start, timestamp);
+      }
+    }
+    return Number.isFinite(start) ? start : 0;
   });
 
   let sessionEndMs = $derived.by(() => {
     if (!timing) return sessionStartMs;
-    return sessionStartMs + Math.max(timing.total_duration_ms, 1);
+    return sessionStartMs + Math.max(totalDurationMs, 1);
   });
 
   function turnLeftPct(turn: TurnTiming): number {
@@ -324,7 +363,7 @@
         {#if timing}
           <span class="v-meta" class:live={timing.running}>
             {#if timing.running}
-              {m.session_vitals_running_duration({ duration: formatDuration(timing.total_duration_ms) })}
+              {m.session_vitals_running_duration({ duration: formatDuration(totalDurationMs) })}
             {:else}
               {formatDuration(timing.total_duration_ms)}
             {/if}
@@ -455,8 +494,8 @@
           </div>
           <div>
             <div class="lbl">{m.session_vitals_slowest_call()}</div>
-            {#if timing.slowest_call}
-              {@const slowest = timing.slowest_call}
+            {#if slowestCall}
+              {@const slowest = slowestCall}
               <button
                 type="button"
                 class="val slow val-link"
@@ -488,17 +527,31 @@
     <section class="v-section activity-section">
       <header class="v-h">
         <span>{m.session_vitals_activity()}</span>
+        <span class="v-meta">{m.session_vitals_active_duration({ duration: formatDuration(activeDurationMs) })}</span>
       </header>
-      <p class="activity-hint">{m.session_vitals_activity_hint()}</p>
+      <p class="activity-hint">{timing.timing_source === "source" ? m.session_vitals_activity_hint() : m.session_vitals_activity_archive_hint()}</p>
+      {#if (timing.idle_duration_ms ?? 0) > 0}
+        <p class="activity-hint">{m.session_vitals_idle_excluded({ duration: formatDuration(timing.idle_duration_ms ?? 0) })}</p>
+      {/if}
+      {#if timing.coverage}
+        <p class="activity-hint" data-timing-coverage={timing.coverage.evidence}>
+          {timing.coverage.evidence === "persisted" ? m.session_vitals_evidence_persisted() : timing.coverage.evidence === "source" ? m.session_vitals_evidence_source() : m.session_vitals_evidence_unavailable()}
+          · {m.session_vitals_timing_coverage({
+            model: formatNumber(timing.coverage.model_intervals),
+            timed: formatNumber(timing.coverage.timed_tool_calls),
+            total: formatNumber(timing.coverage.tool_calls),
+          })}
+        </p>
+      {/if}
       <div class="activity-totals">
         {#each activityKinds as { kind, label } (kind)}
           <span>
             <span class="legend-dot" style="background: {activityToken(kind)};"></span>
-            {label} · {kind === "tool" && !toolTimeMeasured ? m.session_vitals_not_measured() : formatDuration(activityTotal(kind))}
+            {label} · {((kind === "tool" && !toolTimeMeasured) || (kind === "model" && !timing.model_timing_available && activityTotal(kind) === 0)) ? m.session_vitals_not_measured() : formatDuration(activityTotal(kind))}
           </span>
         {/each}
       </div>
-      {#each timing.activity as activity, index (activity.message_id)}
+      {#each timing.activity as activity, index (`${activity.started_at}:${index}`)}
         {@const durationMs = activityDuration(activity)}
         <button
           type="button"
@@ -682,11 +735,11 @@
         {#if ui.vitalsCallsExpanded}
           <div class="scale-axis">
             <span>0</span>
-            <span>{formatDuration(timing.total_duration_ms / 4)}</span>
-            <span>{formatDuration(timing.total_duration_ms / 2)}</span>
+            <span>{formatDuration(totalDurationMs / 4)}</span>
+            <span>{formatDuration(totalDurationMs / 2)}</span>
             <span
               >{formatDuration(
-                (3 * timing.total_duration_ms) / 4,
+                (3 * totalDurationMs) / 4,
               )}</span
             >
             <span class:now={timing.running}

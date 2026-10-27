@@ -249,6 +249,187 @@ If the original rollout moves outside a filtered push's project scope, the
 curation transfer and removal of the old thread row share a transaction. A
 failed transfer leaves the thread and its pins intact.
 
+### Archived activity timing
+
+SQLite retains content-free timing evidence for local Codex and Claude JSONL
+sources in `session_timing_evidence`. Full and incremental session writes capture
+source IDs, active windows, explicit model intervals, and paired tool waiting
+intervals before taking the writer lock. Evidence commits with session source
+metadata for atomic bulk and incremental writes. Normal full imports capture
+evidence before their pending metadata write and publish it only after normalized
+content commits, verifying the full source binding again under the writer lock.
+Pending supported-provider rows stay stale until all required writes succeed,
+so content or publication failures retry without claiming persisted timing.
+`session_timing_pending` retains the prior source binding, timing bounds, and
+transcript revision during a non-atomic full import. While that revision still
+owns the committed messages, reads use its saved evidence, including after
+restart or source deletion. If new content commits before timing publication,
+reads report unavailable source timing until publication succeeds. Their bounds
+come from committed normalized messages, and live extrapolation is disabled
+before durations are assembled, including a failed first import. Pending
+imports never read the newly bound source as a fallback. Successful publication
+or an atomic write clears the pending row; archive preservation copies it.
+Captures use the imported byte
+prefix, validate its SHA-256 when available, and share bounded scans and caches.
+
+Reads prefer evidence whose version, provider, native identity, size, modification
+time, and hash match the imported session. They do not require the source to
+still exist. Unreadable captures preserve existing records; changed source
+bindings cannot reuse them.
+
+A row with an empty `evidence` payload is a saved rejection. It records that
+the bound source cannot supply this session's timing, and reads then skip the
+source fallback. Writers save one only when the cause is deterministic and
+survives appends:
+
+- the Claude parser marks the file as shared (`SourceTimingShared`): it holds
+  in-file DAG forks or a replayed parent prefix, so the main session and its
+  forks would otherwise each receive whole-file timing;
+- a Claude `subagents/agent-*.jsonl` transcript, whose records are all
+  sidechains;
+- the timing reader rejects the imported bytes, for example a forked or
+  subagent Codex rollout, conflicting source identities, or the event limit,
+  after a separate hash proves those bytes match the import;
+- a source or encoded evidence past its size limit.
+
+Incremental appends carry a saved rejection to the new binding without reading
+the source only when it matches the session's complete pre-append binding.
+A stale rejection from a replaced source cannot suppress a new capture.
+Full parses always decide again. An incremental Claude append with
+no saved row skips capture, because only a full parse can show the file is not
+shared. Without a saved decision, reads skip Claude sources for forks,
+continuations, subagent transcripts, and parents of a same-file fork child. Orphan, trash, and replacement copies retain evidence.
+Data version 152 reparses local Codex and Claude sources in place to populate
+activity and execution timing. It includes Codex continuation pages using the
+provider's exact filename/header identity rules and Claude observed tool-result
+endpoints and system-user classification. It also reparses Command Code and the
+Claude-format providers changed by upstream versions 148-150, so preview
+archives already stamped 151 cannot skip those upgrades. Session and message
+identities are preserved; missing sources retain their archived transcripts and
+report coverage gaps. The upstream version declarations stay unchanged.
+Data version 153 reparses only local Claude and Codex sources in place to repair
+queued-prompt and compact-summary boundaries, cumulative Claude tool snapshots,
+and stale rejections after source replacement. Sources that are gone retain
+their archived content and timing evidence.
+Data version 154 repairs queued tool-wait boundaries and ignored user records
+in local Claude timing, and retries Claude and Codex timing with committed
+source bindings. It preserves existing source, session, and message identities.
+Data version 155 repairs repeated queued waits and explicit Claude interruptions
+in place. Missing sources retain their saved evidence and identities.
+Data version 156 repairs IDE-envelope filtering and prompts beside tool results
+in local Claude timing, preserving the same identities.
+Forced mtime resets preserve currently valid evidence and invalidate mismatched
+records before rebinding; source deletion cannot turn a reset into timing loss.
+Timing reads load session bounds, messages, calls, and saved evidence from one
+SQLite snapshot, releasing it before optional source-file I/O.
+
+The timing API reports evidence provenance, recorded or estimated turn boundaries,
+model interval count, and timed versus total tool calls, with separate execution,
+caller-wait, and linked-subagent counts. Counts describe available evidence, not
+complete logging. Missing model intervals remain unmeasured, and active time not
+assigned to model or tools remains unattributed. Idle gaps between recorded turns
+are excluded. Claude turn endpoints conservatively follow the last observed
+assistant or tool result in its source format. IDE envelopes use the canonical
+parser's remainder filtering. Human text carried beside a tool result starts a
+new prompt after the preceding wait closes.
+Provider-classified system entries never split those turns. The total
+timeline preserves the combined extent of session metadata and recorded tasks.
+Source ownership uses a separate projection of fork relationships and paths,
+including trashed forks. Sidebar child summaries are not ownership evidence.
+Recent unfinished Claude and Codex turns can run despite a populated `ended_at`,
+which records the last observation rather than completion. Extrapolation uses
+the existing ten-minute activity window and requires an unchanged, available
+source. Completed, explicitly interrupted, stale, and source-deleted sessions
+retain observed bounds.
+The live client rechecks quiet snapshots every thirty seconds so it stops
+extrapolating when a source goes stale without emitting an update. A failed
+refresh retains the last snapshot and keeps retrying at that cadence, while
+elapsed-time extrapolation pauses during revalidation and until a successful
+response or SSE update. Each timing read has a thirty-second deadline that
+releases its pending request even if the transport ignores cancellation.
+Leaving the sessions route pauses polling and cancels its read while retaining
+the cached snapshot. Returning revalidates that snapshot before the clock advances.
+
+This table is local archive metadata and is not published to SQL mirrors or
+conversation exports. Transient `Session.TimingCapture` also stays out of hosted
+raw content revisions and gob payloads, preserving immutable content IDs.
+Those reads report source-only or unavailable evidence;
+legacy local reads can also use a readable source before the next ingestion.
+The source cache also caps estimated retained memory at 32 MiB, counting strings
+and slice capacities. Captures exceeding source bounds or the 32 MiB metadata
+limit, forked rollouts, joined sidechains, and unsupported providers retain the
+archive fallback and its estimated-boundary label.
+
+### Timing capture checkpoints
+
+Plaintext Codex and Claude JSONL captures resume from
+`session_timing_checkpoints`. Each row contains a versioned timing reducer,
+complete-line byte offset, source binding, and resumable SHA-256 state. Since
+checkpoint version 2, the cursor omits closed evidence and stores only counts.
+Loading rebuilds the closed prefix from the evidence row committed in the same
+transaction, so each append rewrites the evidence once instead of twice. The
+evidence row still holds the full snapshot, so its write size grows with the
+session. Evidence
+and its checkpoint commit in the same transaction; full imports publish them
+only after normalized content succeeds. Checkpoints are disposable optimization
+state and are not copied during orphan/trash preservation rebuilds. The archived
+evidence remains available without a checkpoint or source file.
+Checkpoint version 3 also retains the active Claude assistant message ID and
+its tool-call IDs, so cumulative snapshots do not become ambiguous requests.
+Older cursors fall back to a cold capture using the corrected prompt rules.
+Checkpoint version 4 preserves activity up to a queued prompt when a current
+tool request is still pending, ignores canonical user-noise records, and keeps
+explicit Claude completion state. Checkpoint version 5 carries waiting across
+repeated queued prompts, retains the original request-owning prompt boundary,
+and closes explicit Claude interruptions. Checkpoint version 6 rebuilds prompt
+boundaries using canonical IDE filtering and mixed prompt/result handling.
+The pending-read table is also optional for read-only archives created before
+it existed; writable opens add it in place.
+
+Resumed hashing is checked against the canonical ingestion hash before accepting
+evidence. This proves agreement with the imported snapshot; validation of the
+previous prefix still relies on the provider's append checks rather than a
+second full-source hash. Prefixes that disagree with the imported hash,
+truncation, moved paths, incompatible codecs, and invalid checkpoints fall back
+to a bounded cold capture. A missing checkpoint
+warms on the next successful capture; unchanged archives need no parser resync.
+Incomplete JSONL suffixes are reread, and EOF previews never close unfinished
+turns or tool requests in the saved reducer. Evidence flags the unfinished EOF
+turn as `Open`, so a running session shows it as in progress. Records longer
+than the provider's 64 MiB line limit are hashed but skipped, as normal
+ingestion skips them, instead of discarding the session's timing. SHA state is saved only at complete
+64-byte blocks, so no transcript bytes are retained in its buffer; resuming
+rereads at most 63 bytes before the JSONL boundary to reconstruct that buffer.
+
+Source I/O for a verified append covers the new tail, an unfinished prior line,
+and at most 63 bytes of hash reconstruction. Timing metadata is still decoded
+and serialized as a bounded snapshot. This I/O bound concerns timing capture;
+provider parsing and fingerprinting may perform additional source reads. Archived
+zstd streams keep the bounded full-scan path because compressed byte offsets do
+not identify decoded JSONL boundaries. Compression/restoration changes warm a
+new plaintext checkpoint when appropriate.
+
+Checkpoint version, source binding, offset, and payload byte limits are checked
+in SQLite before loading the cursor or hash state. The optional table is not a
+read-only schema requirement: pre-checkpoint archives can still serve saved
+timing without migrations or source logs. A writable open adds it without
+changing parser versions, session/message identities, or archive-only mode.
+An older binary may leave a stale checkpoint when it updates evidence; the
+evidence/hash join rejects that row and the next capture warms a new one. Future
+reducer or cursor changes must bump `timingCheckpointVersion`. Cursor-codec
+upgrades alone must not require rebuilding the persistent archive. Changes to
+stored timing semantics still follow the parser data-version policy.
+
+Source reads reject non-regular paths before opening and verify the descriptor
+after opening. Unix opens are nonblocking so replacement with a named pipe
+cannot pin a capture worker. Regular files and symlinks to regular files retain
+the same import behavior.
+
+**Deferred PR handoff:** timing evidence and checkpoints remain local to SQLite.
+The eventual PR description must flag that PostgreSQL, DuckDB, and ClickHouse
+mirrors do not retain this evidence and can show less complete timing when
+source logs are unavailable. SQL mirror support is intentionally deferred.
+
 ### Codex incremental import state
 
 Four SQLite-only tables support local Codex imports: `parser_checkpoints` holds
