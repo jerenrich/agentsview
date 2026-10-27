@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -86,6 +87,48 @@ func TestValidateDataVersionScopes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.ErrorContains(t, validateDataVersionScopes(tt.scopes), tt.wantErr)
+		})
+	}
+}
+
+func TestTimingUpgradeIncludesUpstreamAndPreviewVersions(t *testing.T) {
+	// Both upstream archives and timing previews used 148-151. Every affected
+	// provider must be retried even when a preview stamped its row as current.
+	agents := []parser.AgentType{parser.AgentCodex, parser.AgentTraeX, parser.AgentAugureCode, parser.AgentClaude, parser.AgentCommandCode, parser.AgentCowork, parser.AgentQoder, parser.AgentIcodemate}
+	for _, previous := range []int{147, 148, 149, 150, 151} {
+		t.Run(strconv.Itoa(previous), func(t *testing.T) {
+			d := testDB(t)
+			for _, agent := range append(slices.Clone(agents), parser.AgentHermes) {
+				insertSession(t, d, string(agent), "project", func(s *Session) {
+					s.Agent = string(agent)
+					s.SourceSessionID = "native-" + string(agent)
+				})
+				require.NoError(t, d.SetSessionDataVersion(t.Context(), string(agent), previous))
+				timingInsertMessage(t, d, string(agent), 0, "user", "retained without a source log", "2026-04-26T10:00:00Z", false)
+			}
+			ids := make(map[string]int64)
+			for _, agent := range append(slices.Clone(agents), parser.AgentHermes) {
+				ids[string(agent)] = timingMsgID(t, d, string(agent), 0)
+			}
+			require.NoError(t, d.Update(t.Context(), func(tx *sql.Tx) error {
+				return writeUserVersion(t.Context(), tx, previous)
+			}))
+			path := d.Path()
+			require.NoError(t, d.Close())
+			upgraded, err := OpenIsolated(t.Context(), path)
+			require.NoError(t, err)
+			defer upgraded.Close()
+			assert.False(t, upgraded.NeedsResync(), "scoped upgrades must not replace the archive")
+			for _, agent := range agents {
+				assert.Equal(t, previous, upgraded.GetSessionDataVersion(t.Context(), string(agent)), "provider %s needs a reparse", agent)
+			}
+			assert.Equal(t, CurrentDataVersion(), upgraded.GetSessionDataVersion(t.Context(), "hermes"))
+			for id, messageID := range ids {
+				assert.Equal(t, messageID, timingMsgID(t, upgraded, id, 0), "missing sources must not discard message identities")
+				var native string
+				require.NoError(t, upgraded.getReader().QueryRowContext(t.Context(), "SELECT source_session_id FROM sessions WHERE id=?", id).Scan(&native))
+				assert.Equal(t, "native-"+id, native)
+			}
 		})
 	}
 }

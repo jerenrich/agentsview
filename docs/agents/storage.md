@@ -267,11 +267,14 @@ Reads prefer evidence whose version, provider, native identity, size, modificati
 time, and hash match the imported session. They do not require the source to
 still exist. Unreadable captures preserve existing records; changed source
 bindings cannot reuse them. Orphan, trash, and replacement copies retain evidence.
-Data version 149 reparses local Codex and Claude sources in place to populate it;
-missing sources retain their archived transcripts and report coverage gaps.
-Data version 150 backfills Codex continuation pages using the provider’s exact
-filename/header identity rules, including older page headers. Data version 151
-backfills Claude observed tool-result endpoints and system-user classification.
+Data version 152 reparses local Codex and Claude sources in place to populate
+activity and execution timing. It includes Codex continuation pages using the
+provider's exact filename/header identity rules and Claude observed tool-result
+endpoints and system-user classification. It also reparses Command Code and the
+Claude-format providers changed by upstream versions 148-150, so preview
+archives already stamped 151 cannot skip those upgrades. Session and message
+identities are preserved; missing sources retain their archived transcripts and
+report coverage gaps. The upstream version declarations stay unchanged.
 Forced mtime resets preserve currently valid evidence and invalidate mismatched
 records before rebinding; source deletion cannot turn a reset into timing loss.
 Timing reads load session bounds, messages, calls, and saved evidence from one

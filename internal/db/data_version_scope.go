@@ -34,9 +34,12 @@ var dataVersionScopes = map[int][]parser.AgentType{
 	146: {parser.AgentPi, parser.AgentOMP, parser.AgentOMO, parser.AgentPrimeAgent, parser.AgentStepCode, parser.AgentIflow, parser.AgentClaude, parser.AgentCowork, parser.AgentIcodemate, parser.AgentQoder, parser.AgentCursor, parser.AgentAmp, parser.AgentOpenClaude, parser.AgentOpenClaw, parser.AgentQClaw, parser.AgentDevin, parser.AgentOpenHands, parser.AgentCodex, parser.AgentTraeX, parser.AgentAugureCode},
 	147: {parser.AgentVSCodeCopilot, parser.AgentPositron, parser.AgentWindsurf},
 	148: {parser.AgentCodex, parser.AgentTraeX, parser.AgentAugureCode},
-	149: {parser.AgentCodex, parser.AgentClaude},
-	150: {parser.AgentCodex},
+	149: {parser.AgentCommandCode},
+	150: {parser.AgentClaude, parser.AgentCowork, parser.AgentQoder, parser.AgentIcodemate},
 	151: {parser.AgentClaude},
+	// Preview archives already used 151 before the upstream 148-150 changes.
+	// Reparse their affected providers too instead of treating those rows as current.
+	152: {parser.AgentCodex, parser.AgentTraeX, parser.AgentAugureCode, parser.AgentClaude, parser.AgentCommandCode, parser.AgentCowork, parser.AgentQoder, parser.AgentIcodemate},
 }
 
 // firstScopedDataVersion is the oldest version that may be declared. Released
