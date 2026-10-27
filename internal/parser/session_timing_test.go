@@ -321,3 +321,120 @@ func TestReadSessionTimingSkipsOversizedRecordsLikeIngestion(t *testing.T) {
 		})
 	}
 }
+
+func TestReadSessionTimingClaudeQueuedCommands(t *testing.T) {
+	for _, tc := range []struct {
+		name, prompt string
+		human        bool
+	}{
+		{"human prompt", "next request", true},
+		{"command prompt", "<command-name>/review</command-name>", true},
+		{"system reminder with prompt", "<system-reminder>context</system-reminder>\nnext request", true},
+		{"peer message", "<cross-session-message sender=\"peer\">context</cross-session-message>", false},
+		{"notification", "<task-notification>done</task-notification>", false},
+		{"empty prompt", "  ", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prompt, err := json.Marshal(tc.prompt)
+			require.NoError(t, err)
+			source := strings.Join([]string{
+				`{"timestamp":"2026-04-26T10:00:00Z","type":"user","sessionId":"timing","message":{"content":"first request"}}`,
+				`{"timestamp":"2026-04-26T10:00:02Z","type":"assistant","sessionId":"timing","message":{"content":"done"}}`,
+				`{"timestamp":"2026-04-26T11:00:00Z","type":"attachment","sessionId":"timing","attachment":{"type":"queued_command","commandMode":"prompt","prompt":` + string(prompt) + `}}`,
+				`{"timestamp":"2026-04-26T11:00:03Z","type":"assistant","sessionId":"timing","message":{"content":"done"}}`,
+			}, "\n")
+			sess, _ := runClaudeParserTest(t, "timing.jsonl", source)
+			evidence, err := ReadSessionTiming(t.Context(), strings.NewReader(source), "claude")
+			require.NoError(t, err)
+			assert.False(t, sess.SourceTimingShared)
+			if tc.human {
+				assert.Equal(t, 2, sess.UserMessageCount)
+				require.Len(t, evidence.Turns, 2)
+				assert.Equal(t, int64(2000), evidence.Turns[0].End-evidence.Turns[0].Start)
+				assert.Equal(t, int64(3000), evidence.Turns[1].End-evidence.Turns[1].Start)
+			} else {
+				assert.Equal(t, 1, sess.UserMessageCount)
+				require.Len(t, evidence.Turns, 1)
+			}
+		})
+	}
+
+	t.Run("unanswered queued prompt remains open", func(t *testing.T) {
+		source := `{"timestamp":"2026-04-26T10:00:00Z","type":"attachment","sessionId":"timing","attachment":{"type":"queued_command","prompt":"first request"}}`
+		evidence, err := ReadSessionTiming(t.Context(), strings.NewReader(source), "claude")
+		require.NoError(t, err)
+		require.Len(t, evidence.Turns, 1)
+		assert.Equal(t, evidence.Turns[0].Start, evidence.Turns[0].End)
+		assert.True(t, evidence.Open)
+	})
+}
+
+func TestReadSessionTimingClaudeCompactSummariesDoNotSplitTurn(t *testing.T) {
+	for _, kind := range []string{"user", "assistant"} {
+		t.Run(kind, func(t *testing.T) {
+			source := strings.Join([]string{
+				`{"timestamp":"2026-04-26T10:00:00Z","type":"user","sessionId":"timing","message":{"content":"first request"}}`,
+				`{"timestamp":"2026-04-26T10:00:01Z","type":"assistant","sessionId":"timing","message":{"content":"working"}}`,
+				`{"timestamp":"2026-04-26T10:00:02Z","type":"` + kind + `","isCompactSummary":true,"thinkingDurationMs":2000,"sessionId":"timing","message":{"content":"Summary of conversation so far..."}}`,
+				`{"timestamp":"2026-04-26T10:00:03Z","type":"assistant","sessionId":"timing","message":{"content":"done"}}`,
+			}, "\n")
+			sess, messages := runClaudeParserTest(t, "timing.jsonl", source)
+			assert.Equal(t, 1, sess.UserMessageCount)
+			require.Len(t, messages, 4)
+			assert.True(t, messages[2].IsSystem)
+			assert.True(t, messages[2].IsCompactBoundary)
+			evidence, err := ReadSessionTiming(t.Context(), strings.NewReader(source), "claude")
+			require.NoError(t, err)
+			require.Len(t, evidence.Turns, 1)
+			assert.Equal(t, int64(3000), evidence.Turns[0].End-evidence.Turns[0].Start)
+			assert.Empty(t, evidence.Model, "quoted compact summaries cannot supply model evidence")
+		})
+	}
+}
+
+func TestReadSessionTimingClaudeAssistantSnapshots(t *testing.T) {
+	for _, tc := range []struct {
+		name, firstID, nextID, between string
+		wantCalls                      int
+	}{
+		{"same response snapshots", "response", "response", "", 1},
+		{"snapshot across system record", "response", "response", `{"timestamp":"2026-04-26T10:00:01.5Z","type":"system","sessionId":"timing","content":"private-snapshot-text"}`, 1},
+		{"snapshot across queued attachment", "response", "response", `{"timestamp":"2026-04-26T10:00:01.5Z","type":"attachment","sessionId":"timing","attachment":{"type":"queued_command","prompt":"private-snapshot-text"}}`, 1},
+		{"different responses are ambiguous", "response-one", "response-two", "", 0},
+		{"missing response IDs are ambiguous", "", "", "", 0},
+		{"user record ends response run", "response", "response", `{"timestamp":"2026-04-26T10:00:01.5Z","type":"user","sessionId":"timing","message":{"content":"private-snapshot-text"}}`, 0},
+		{"hidden user ends response run", "response", "response", `{"timestamp":"2026-04-26T10:00:01.5Z","type":"user","isMeta":true,"sessionId":"timing","message":{"content":"private-snapshot-text"}}`, 0},
+		{"undated hidden user ends response run", "response", "response", `{"type":"user","isMeta":true,"sessionId":"timing","message":{"content":"private-snapshot-text"}}`, 0},
+		{"ignored distinct assistant ends response run", "response", "response", `{"timestamp":"2026-04-26T10:00:01.5Z","type":"assistant","isMeta":true,"sessionId":"timing","message":{"id":"hidden-response","content":"private-snapshot-text"}}`, 0},
+		{"compact boundary ends response run", "response", "response", `{"timestamp":"2026-04-26T10:00:01.5Z","type":"user","isCompactSummary":true,"sessionId":"timing","message":{"content":"private-snapshot-text"}}`, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := strings.Join([]string{
+				`{"timestamp":"2026-04-26T10:00:00Z","type":"user","sessionId":"timing","message":{"content":"first request"}}`,
+				`{"timestamp":"2026-04-26T10:00:01Z","type":"assistant","sessionId":"timing","message":{"id":"` + tc.firstID + `","content":[{"type":"text","text":"private-snapshot-text"},{"type":"tool_use","id":"call","name":"Read","input":{"file_path":"private-snapshot-path"}}]}}`,
+				tc.between,
+				`{"timestamp":"2026-04-26T10:00:02Z","type":"assistant","sessionId":"timing","message":{"id":"` + tc.nextID + `","content":[{"type":"text","text":"private-snapshot-text"},{"type":"tool_use","id":"call","name":"Read","input":{"file_path":"private-snapshot-path"}},{"type":"text","text":"More"}]}}`,
+				`{"timestamp":"2026-04-26T10:00:04Z","type":"user","sessionId":"timing","message":{"content":[{"type":"tool_result","tool_use_id":"call","content":"private-snapshot-output"}]}}`,
+			}, "\n")
+			evidence, err := ReadSessionTiming(t.Context(), strings.NewReader(source), "claude")
+			require.NoError(t, err)
+			require.Len(t, evidence.Calls, tc.wantCalls)
+			if tc.wantCalls > 0 {
+				assert.Equal(t, int64(3000), evidence.Calls[0].End-evidence.Calls[0].Start, "keep the first observed request endpoint")
+			}
+			if strings.Contains(tc.between, `"type":"user","isMeta":true`) {
+				_, messages := runClaudeParserTest(t, "timing.jsonl", source)
+				calls := 0
+				for _, message := range messages {
+					calls += len(message.ToolCalls)
+				}
+				assert.Equal(t, 2, calls, "hidden users still separate normalized assistant calls")
+			}
+			if tc.between == "" && tc.firstID != "" && tc.firstID == tc.nextID {
+				_, messages := runClaudeParserTest(t, "timing.jsonl", source)
+				require.Len(t, messages, 3)
+				require.Len(t, messages[1].ToolCalls, 1, "normalized ingestion also sees one call")
+			}
+		})
+	}
+}

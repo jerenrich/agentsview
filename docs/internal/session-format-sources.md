@@ -140,6 +140,16 @@ evidence; they do not establish whether a tool helped the task.
 
 ## Claude Code (`claude`)
 
+- **Timing parser parity (2026-10-27):** Reverified queued prompt attachments,
+  explicit `isCompactSummary` boundaries, and cumulative assistant snapshots
+  against normalized ingestion and checkpoint/restart fixtures. Queued human
+  prompts start turns; compact summaries remain system boundaries within the
+  active turn. Repeated `tool_use` blocks in one assistant `message.id` run
+  represent the same request, retaining its first timestamp across snapshots.
+  Different message IDs that reuse a pending call ID remain ambiguous.
+  Checkpoint version 3 retains only message/call IDs for this distinction.
+  Data version 153 reparses local Claude timing in place.
+
 - **Shared-file timing (2026-10-27):** Reverified with in-file fork and
   background-fork lineage fixtures. When the DAG parse splits a file into
   several sessions, or lineage drops a replayed parent prefix, the file's

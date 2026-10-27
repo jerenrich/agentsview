@@ -476,6 +476,98 @@ describe("SessionVitals", () => {
     );
   });
 
+  it.each([3000, undefined])(
+    "advances the active header with unfinished activity (%s)",
+    async (activeDurationMs) => {
+      const startMs = Date.now() - 1000;
+      mocks.fetchSessionTiming.mockResolvedValue({
+        ...mocks.timing,
+        active_duration_ms: activeDurationMs,
+        total_duration_ms: 63000,
+        idle_duration_ms: 60000,
+        running: true,
+        activity_totals: { tool_ms: 0, unattributed_ms: 3000 },
+        activity: [
+          {
+            message_id: 1,
+            ordinal: 0,
+            started_at: new Date(startMs - 62000).toISOString(),
+            duration_ms: 2000,
+            tool_ms: 0,
+            unattributed_ms: 2000,
+            running: false,
+          },
+          {
+            message_id: 2,
+            ordinal: 1,
+            started_at: new Date(startMs).toISOString(),
+            duration_ms: 1000,
+            tool_ms: 0,
+            unattributed_ms: 1000,
+            running: true,
+          },
+        ],
+      });
+      component = mount(SessionVitals, {
+        target: document.body,
+        props: { sessionId: "sess-1", session: undefined },
+      });
+      await tick();
+      await tick();
+
+      liveTick.now = startMs + 61000;
+      await tick();
+
+      const rows = document.querySelectorAll(".activity-row");
+      expect(rows[0]?.getAttribute("aria-label")).toBe("Turn 1 · 2.0s");
+      expect(rows[1]?.getAttribute("aria-label")).toBe("Turn 2 · 1m 1s");
+      expect(document.querySelector(".activity-section .v-meta")?.textContent).toBe(
+        "Active · 1m 3s",
+      );
+      expect(document.querySelector(".activity-totals")?.textContent).toContain(
+        "Unattributed · 1m 3s",
+      );
+      expect(document.querySelector(".activity-section")?.textContent).toContain(
+        "Idle excluded · 1m 0s",
+      );
+    },
+  );
+
+  it("keeps completed activity and its active header unchanged as live time advances", async () => {
+    const startMs = Date.now() - 1000;
+    mocks.fetchSessionTiming.mockResolvedValue({
+      ...mocks.timing,
+      active_duration_ms: 2000,
+      running: false,
+      activity_totals: { tool_ms: 0, unattributed_ms: 2000 },
+      activity: [
+        {
+          message_id: 1,
+          ordinal: 0,
+          started_at: new Date(startMs).toISOString(),
+          duration_ms: 2000,
+          tool_ms: 0,
+          unattributed_ms: 2000,
+          running: false,
+        },
+      ],
+    });
+    component = mount(SessionVitals, {
+      target: document.body,
+      props: { sessionId: "sess-1", session: undefined },
+    });
+    await tick();
+    await tick();
+
+    liveTick.now = startMs + 61000;
+    await tick();
+
+    expect(document.querySelector(".activity-row")?.getAttribute("aria-label")).toBe(
+      "Turn 1 · 2.0s",
+    );
+    expect(document.querySelector(".activity-section .v-meta")?.textContent).toBe("Active · 2.0s");
+  });
+
   it("updates a running activity from live time", async () => {
     const startMs = Date.now() - 1000;
     mocks.fetchSessionTiming.mockResolvedValue({

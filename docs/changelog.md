@@ -60,6 +60,11 @@ The latest release is
 
 **Bug fixes**
 
+- Claude activity timing recognizes queued prompts, ignores compact summaries
+  as prompt boundaries, and preserves tool waits across cumulative assistant
+  snapshots. Timing can recover after a source replacement, and the live
+  **Active** total advances with its turn rows. Available Claude and Codex
+  sources are reprocessed in place; retained archives remain available.
 - Claude Code token and cost totals now include responses that contain only an
   empty thinking block. These responses still show nothing in the transcript,
   but their usage was dropped. Existing Claude-format sources are reprocessed on

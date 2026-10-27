@@ -19,8 +19,9 @@ import (
 
 // Increment when the reducer semantics or encoded continuation state changes.
 // Evidence versioning is independent: invalid cursors can always be rebuilt.
-// Version 2 stops repeating closed evidence inside the cursor.
-const timingCheckpointVersion = 2
+// Version 3 tracks cumulative Claude assistant snapshots and correct prompt
+// classification; older reducers must cold-capture the source again.
+const timingCheckpointVersion = 3
 
 // timingCursor is the stored reducer state without its closed evidence. The
 // counts select the closed prefix of the evidence row committed with it: EOF

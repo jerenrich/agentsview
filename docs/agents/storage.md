@@ -284,7 +284,9 @@ survives appends:
 - a source or encoded evidence past its size limit.
 
 Incremental appends carry a saved rejection to the new binding without reading
-the source. Full parses always decide again. An incremental Claude append with
+the source only when it matches the session's complete pre-append binding.
+A stale rejection from a replaced source cannot suppress a new capture.
+Full parses always decide again. An incremental Claude append with
 no saved row skips capture, because only a full parse can show the file is not
 shared. Without a saved decision, reads skip Claude sources for forks,
 continuations, subagent transcripts, and parents of a same-file fork child. Orphan, trash, and replacement copies retain evidence.
@@ -296,6 +298,10 @@ Claude-format providers changed by upstream versions 148-150, so preview
 archives already stamped 151 cannot skip those upgrades. Session and message
 identities are preserved; missing sources retain their archived transcripts and
 report coverage gaps. The upstream version declarations stay unchanged.
+Data version 153 reparses only local Claude and Codex sources in place to repair
+queued-prompt and compact-summary boundaries, cumulative Claude tool snapshots,
+and stale rejections after source replacement. Sources that are gone retain
+their archived content and timing evidence.
 Forced mtime resets preserve currently valid evidence and invalidate mismatched
 records before rebinding; source deletion cannot turn a reset into timing loss.
 Timing reads load session bounds, messages, calls, and saved evidence from one
@@ -334,6 +340,9 @@ and its checkpoint commit in the same transaction; full imports publish them
 only after normalized content succeeds. Checkpoints are disposable optimization
 state and are not copied during orphan/trash preservation rebuilds. The archived
 evidence remains available without a checkpoint or source file.
+Checkpoint version 3 also retains the active Claude assistant message ID and
+its tool-call IDs, so cumulative snapshots do not become ambiguous requests.
+Older cursors fall back to a cold capture using the corrected prompt rules.
 
 Resumed hashing is checked against the canonical ingestion hash before accepting
 evidence. This proves agreement with the imported snapshot; validation of the

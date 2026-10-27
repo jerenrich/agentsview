@@ -75,6 +75,107 @@ func TestTimingRejectionIsSavedAndCarriedForward(t *testing.T) {
 	assert.Empty(t, timing.TimingSource)
 }
 
+func TestTimingRejectionDoesNotSurviveSourceReplacement(t *testing.T) {
+	d := testDB(t)
+	s, _ := forkedRolloutFixture(t, d)
+	require.NoError(t, d.UpsertSession(t.Context(), s))
+	_, rejected, err := d.storedTimingEvidence(t.Context(), &s)
+	require.NoError(t, err)
+	require.True(t, rejected)
+
+	// A full import advances to an unforked source while optional timing
+	// capture cannot open the file. Its old rejection remains in the archive.
+	content := []byte(strings.Join([]string{
+		`{"timestamp":"2026-04-26T10:00:00Z","type":"session_meta","payload":{"id":"retained"}}`,
+		`{"timestamp":"2026-04-26T10:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"first"}}`,
+		`{"timestamp":"2026-04-26T10:00:06Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"first"}}`,
+	}, "\n") + "\n")
+	s = writeTimingSnapshot(t, s, content)
+	require.NoError(t, os.Remove(*s.FilePath))
+	s = d.PrepareSessionTimingEvidence(t.Context(), s)
+	require.Nil(t, s.TimingCapture)
+	_, err = d.UpsertSessionPendingContent(t.Context(), s)
+	require.NoError(t, err)
+	messages, err := d.GetAllMessages(t.Context(), s.ID)
+	require.NoError(t, err)
+	require.NoError(t, d.ReplaceSessionMessages(t.Context(), s.ID, messages))
+	require.NoError(t, d.PublishSessionTimingEvidence(t.Context(), s))
+
+	// Once the source returns, reads ignore the stale rejection. The next
+	// append must capture valid evidence instead of promoting that rejection.
+	content = append(content, []byte(`{"opaque":"append"}`+"\n")...)
+	next := writeTimingSnapshot(t, s, content)
+	before, err := d.GetSessionTiming(t.Context(), s.ID)
+	require.NoError(t, err)
+	require.Equal(t, "source", before.Coverage.Evidence)
+	require.NoError(t, d.UpdateSessionIncremental(t.Context(), s.ID, IncrementalSessionUpdate{
+		FileSize: *next.FileSize, FileMtime: *next.FileMtime, FileHash: next.FileHash,
+		MsgCount: 3, UserMsgCount: 1, NextOrdinal: 3, EndedAt: s.EndedAt,
+	}))
+	require.NoError(t, os.Remove(*s.FilePath))
+	after, err := d.GetSessionTiming(t.Context(), s.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "persisted", after.Coverage.Evidence)
+	assert.Equal(t, before.ActivityTotals, after.ActivityTotals)
+}
+
+func TestIncrementalTimingValidatesSavedDecisionBinding(t *testing.T) {
+	for _, agent := range []string{"codex", "claude"} {
+		t.Run(agent, func(t *testing.T) {
+			for _, tc := range []struct {
+				name, mutation string
+			}{
+				{"matching rejection", ""},
+				{"stale agent", "agent='previous-agent'"},
+				{"stale native identity", "source_id='previous-source'"},
+				{"stale size", "file_size=file_size+1"},
+				{"stale modification time", "file_mtime=file_mtime+1"},
+				{"stale hash", "file_hash='previous-hash'"},
+				{"stale version", "version=version+1"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					d := testDB(t)
+					path := filepath.Join(t.TempDir(), "session.jsonl")
+					content := `{"timestamp":"2026-04-26T10:00:00Z","type":"session_meta","payload":{"id":"native"}}` + "\n"
+					if agent == "claude" {
+						content = `{"timestamp":"2026-04-26T10:00:00Z","type":"user","sessionId":"native","message":{"content":"go"}}` + "\n"
+					}
+					s := writeTimingSnapshot(t, Session{
+						ID: agent + ":archive-row", SourceSessionID: "native", Agent: agent,
+						Project: "project", Machine: "local", FilePath: &path,
+					}, []byte(content))
+					require.NoError(t, d.UpsertSession(t.Context(), ExcludeSessionTimingEvidence(s)))
+					if tc.mutation != "" {
+						_, err := d.getWriter().Exec(t.Context(), "UPDATE session_timing_evidence SET "+tc.mutation+" WHERE session_id=?", s.ID)
+						require.NoError(t, err)
+					}
+					next := writeTimingSnapshot(t, s, []byte(content+`{"opaque":"append"}`+"\n"))
+					if tc.mutation == "" {
+						// A valid decision survives an append even without source I/O.
+						require.NoError(t, os.Remove(path))
+					}
+					update, err := d.prepareIncrementalTiming(t.Context(), s.ID, IncrementalSessionUpdate{
+						FileSize: *next.FileSize, FileMtime: *next.FileMtime, FileHash: next.FileHash,
+					})
+					require.NoError(t, err)
+					switch {
+					case tc.mutation == "":
+						require.NotNil(t, update.TimingCapture)
+						assert.True(t, update.TimingCapture.Rejected)
+						assert.True(t, timingEvidenceMatchesSession(update.TimingCapture, &next))
+					case agent == "claude":
+						assert.Nil(t, update.TimingCapture, "a stale decision cannot prove a Claude file is unshared")
+					default:
+						require.NotNil(t, update.TimingCapture)
+						assert.False(t, update.TimingCapture.Rejected)
+						assert.NotNil(t, update.TimingCapture.Evidence)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestTimingRejectionRequiresImportedHash(t *testing.T) {
 	d := testDB(t)
 	s, _ := forkedRolloutFixture(t, d)

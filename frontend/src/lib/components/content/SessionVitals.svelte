@@ -202,6 +202,18 @@
     return Math.max(activity.duration_ms, liveTick.now - start, 0);
   }
 
+  let activeDurationMs = $derived.by(() => {
+    if (!timing) return 0;
+    const snapshotDuration = timing.active_duration_ms ?? timing.activity.reduce(
+      (sum, activity) => sum + activity.duration_ms,
+      0,
+    );
+    return snapshotDuration + timing.activity.reduce(
+      (sum, activity) => sum + activityDuration(activity) - activity.duration_ms,
+      0,
+    );
+  });
+
   function activityValue(
     activity: TurnActivity,
     kind: ActivityKind,
@@ -507,7 +519,7 @@
     <section class="v-section activity-section">
       <header class="v-h">
         <span>{m.session_vitals_activity()}</span>
-        <span class="v-meta">{m.session_vitals_active_duration({ duration: formatDuration(timing.active_duration_ms ?? timing.activity.reduce((sum, row) => sum + row.duration_ms, 0)) })}</span>
+        <span class="v-meta">{m.session_vitals_active_duration({ duration: formatDuration(activeDurationMs) })}</span>
       </header>
       <p class="activity-hint">{timing.timing_source === "source" ? m.session_vitals_activity_hint() : m.session_vitals_activity_archive_hint()}</p>
       {#if (timing.idle_duration_ms ?? 0) > 0}

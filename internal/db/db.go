@@ -616,7 +616,9 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // (152: retain local Codex and Claude activity/execution timing, including
 // continuation pages, and reparse upstream provider changes in preview archives
 // whose independently allocated versions overlapped 148-151.)
-const dataVersion = 152
+// (153: repair Claude queued-prompt, compact-summary, and cumulative-call timing,
+// and stale timing rejections on replaced Claude and Codex sources in place.)
+const dataVersion = 153
 
 const archiveOnlyVersionBase = 1 << 20
 

@@ -64,6 +64,10 @@ func ReadSessionTiming(ctx context.Context, source io.Reader, agent string, sour
 	return evidence, err
 }
 
+// Assistant snapshot deduplication retains IDs only, with the same bounded
+// metadata budget as a persisted timing cursor.
+const maxTimingClaudeMessageBytes = 32 << 20
+
 // SessionTimingState is a resumable, content-free timing reducer. Evidence holds
 // only closed turns; Snapshot adds provisional EOF bounds without closing state.
 // Persist only at a complete JSONL boundary, never with a partial source record.
@@ -75,6 +79,11 @@ type SessionTimingState struct {
 	LastActivity       int64
 	Prompt             int64
 	LastClaudeActivity int64
+	// Claude writes cumulative and additive snapshots under one message ID.
+	// Keep the current assistant run's observed calls across checkpoint resumes.
+	ClaudeMessageID    string
+	ClaudeMessageCalls map[string]bool
+	ClaudeMessageBytes int
 }
 
 func (s *SessionTimingState) Clone() *SessionTimingState {
@@ -99,6 +108,7 @@ func (s *SessionTimingState) Clone() *SessionTimingState {
 	out.Starts = maps.Clone(s.Starts)
 	out.Calls = maps.Clone(s.Calls)
 	out.AmbiguousCalls = maps.Clone(s.AmbiguousCalls)
+	out.ClaudeMessageCalls = maps.Clone(s.ClaudeMessageCalls)
 	if out.Starts == nil {
 		out.Starts = map[string]int64{}
 	}
@@ -150,8 +160,19 @@ func (s *SessionTimingState) Valid() bool {
 	if s == nil {
 		return false
 	}
-	n := len(s.Evidence.Model) + len(s.Evidence.Calls) + len(s.Evidence.Turns) + len(s.Starts) + len(s.Calls) + len(s.AmbiguousCalls)
+	n := len(s.Evidence.Model) + len(s.Evidence.Calls) + len(s.Evidence.Turns) + len(s.Starts) + len(s.Calls) + len(s.AmbiguousCalls) + len(s.ClaudeMessageCalls)
 	if n > 100000 || len(s.Starts) > 1 {
+		return false
+	}
+	messageBytes := len(s.ClaudeMessageID)
+	for id := range s.ClaudeMessageCalls {
+		messageBytes += len(id)
+		if messageBytes > maxTimingClaudeMessageBytes {
+			return false
+		}
+	}
+	if messageBytes > maxTimingClaudeMessageBytes || messageBytes != s.ClaudeMessageBytes ||
+		(s.ClaudeMessageID == "" && len(s.ClaudeMessageCalls) > 0) {
 		return false
 	}
 	for _, spans := range [][]TimingInterval{s.Evidence.Model, s.Evidence.Turns} {
@@ -327,6 +348,17 @@ func (s *SessionTimingState) consume(line []byte, agent, path string) error {
 		}
 		return nil
 	}
+	if agent == string(AgentClaude) {
+		// The provider merges assistant chunks before hiding metadata users.
+		// Every user entry ends that run, including hidden or undated entries.
+		// An ignored assistant with another ID also breaks the prior run.
+		kind := entry.Get("type").Str
+		messageID := entry.Get("message.id").Str
+		if kind == "user" || kind == "assistant" && (messageID == "" || messageID != s.ClaudeMessageID) ||
+			entry.Get("isCompactSummary").Bool() {
+			s.resetClaudeMessage()
+		}
+	}
 	ts := parseTimestamp(entry.Get("timestamp").Str)
 	if ts.IsZero() {
 		return nil
@@ -394,8 +426,33 @@ func (s *SessionTimingState) consume(line []byte, agent, path string) error {
 			out.SourceID = strings.Clone(id)
 		}
 		kind := entry.Get("type").Str
+		if entry.Get("isCompactSummary").Bool() {
+			// Both user and assistant compact summaries are system boundaries.
+			// They end a streaming run but never start a human turn or supply
+			// assistant/tool evidence from their quoted summary content.
+			s.resetClaudeMessage()
+			return nil
+		}
+		if kind == "attachment" {
+			if queued, ok := extractQueuedCommand(entry.Raw); ok && !queuedCommandMessage(queued).IsSystem {
+				s.closeClaude()
+				s.Prompt, s.LastClaudeActivity = stamp, 0
+			}
+			return nil
+		}
 		if kind != "user" && kind != "assistant" {
 			return nil
+		}
+		if kind == "assistant" {
+			messageID := entry.Get("message.id").Str
+			if messageID == "" || messageID != s.ClaudeMessageID {
+				s.resetClaudeMessage()
+				if len(messageID) > maxTimingClaudeMessageBytes {
+					return ErrTimingSourceUnsupported
+				}
+				s.ClaudeMessageID = strings.Clone(messageID)
+				s.ClaudeMessageBytes = len(messageID)
+			}
 		}
 		blocks := entry.Get("message.content")
 		isResult := false
@@ -403,7 +460,18 @@ func (s *SessionTimingState) consume(line []byte, agent, path string) error {
 			switch block.Get("type").Str {
 			case "tool_use":
 				if kind == "assistant" {
-					request(block.Get("id").Str, stamp)
+					id := block.Get("id").Str
+					if s.ClaudeMessageID != "" && id != "" {
+						if s.ClaudeMessageCalls[id] {
+							return true
+						}
+						if s.ClaudeMessageCalls == nil {
+							s.ClaudeMessageCalls = map[string]bool{}
+						}
+						s.ClaudeMessageCalls[strings.Clone(id)] = true
+						s.ClaudeMessageBytes += len(id)
+					}
+					request(id, stamp)
 				}
 			case "tool_result":
 				isResult = true
@@ -438,8 +506,17 @@ func (s *SessionTimingState) consume(line []byte, agent, path string) error {
 			}
 		}
 	}
-	if len(out.Model)+len(out.Calls)+len(out.Turns)+len(starts)+len(calls) > 100000 {
+	if len(out.Model)+len(out.Calls)+len(out.Turns)+len(starts)+len(calls)+len(ambiguousCalls)+len(s.ClaudeMessageCalls) > 100000 ||
+		s.ClaudeMessageBytes > maxTimingClaudeMessageBytes {
 		return ErrTimingSourceUnsupported
 	}
 	return nil
+}
+
+// Only user/assistant entries participate in the provider's streaming runs;
+// attachments and other system records are removed before its merge step.
+func (s *SessionTimingState) resetClaudeMessage() {
+	s.ClaudeMessageID = ""
+	s.ClaudeMessageCalls = nil
+	s.ClaudeMessageBytes = 0
 }

@@ -252,20 +252,30 @@ const (
 func (db *DB) prepareIncrementalTiming(ctx context.Context, id string, update IncrementalSessionUpdate) (IncrementalSessionUpdate, error) {
 	update.TimingCapture = nil
 	// One indexed metadata read, without transcript or curation hydration.
-	s := Session{ID: id, FileSize: &update.FileSize, FileMtime: &update.FileMtime}
+	s := Session{ID: id}
+	var prior timingEvidenceRecord
 	var saved int
-	err := db.getReader().QueryRowContext(ctx, `SELECT s.agent, s.source_session_id, s.file_path, s.file_hash,
+	err := db.getReader().QueryRowContext(ctx, `SELECT s.agent, s.source_session_id, s.file_path, s.file_size, s.file_mtime, s.file_hash,
+ COALESCE(e.agent,''), COALESCE(e.source_id,''), COALESCE(e.file_size,0), COALESCE(e.file_mtime,0), COALESCE(e.file_hash,''),
  CASE WHEN e.session_id IS NULL OR e.version<>? THEN ? WHEN e.evidence='' THEN ? ELSE ? END
  FROM sessions s LEFT JOIN session_timing_evidence e ON e.session_id=s.id
  WHERE s.id=? AND s.agent IN ('codex','claude')`,
 		timingEvidenceVersion, incrementalTimingNone, incrementalTimingRejected, incrementalTimingEvidence, id,
-	).Scan(&s.Agent, &s.SourceSessionID, &s.FilePath, &s.FileHash, &saved)
+	).Scan(&s.Agent, &s.SourceSessionID, &s.FilePath, &s.FileSize, &s.FileMtime, &s.FileHash,
+		&prior.Agent, &prior.SourceID, &prior.Size, &prior.Mtime, &prior.Hash, &saved)
 	if err == sql.ErrNoRows {
 		return update, nil
 	}
 	if err != nil {
 		return update, err
 	}
+	// A full replacement may advance the imported source while optional timing
+	// capture is unavailable, leaving older evidence behind. Validate against
+	// the pre-append binding before rebinding any saved decision to the tail.
+	if !timingEvidenceMatchesSession(&prior, &s) {
+		saved = incrementalTimingNone
+	}
+	s.FileSize, s.FileMtime = &update.FileSize, &update.FileMtime
 	if update.FileHash != nil {
 		s.FileHash = update.FileHash
 	}

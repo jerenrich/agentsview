@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -131,6 +132,44 @@ func TestTimingUpgradeIncludesUpstreamAndPreviewVersions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTimingRepairUpgradePreservesRetainedArchive(t *testing.T) {
+	const previous = 152
+	assert.ElementsMatch(t, []parser.AgentType{parser.AgentClaude, parser.AgentCodex},
+		ScopedDataVersionProviders(previous, previous+1))
+	d := testDB(t)
+	s := archivedTimingFixture(t, d)
+	require.NoError(t, d.UpsertSession(t.Context(), s))
+	before, err := d.GetSessionTiming(t.Context(), s.ID)
+	require.NoError(t, err)
+	require.Equal(t, "persisted", before.Coverage.Evidence)
+	messageID := timingMsgID(t, d, s.ID, 0)
+	require.NoError(t, os.Remove(*s.FilePath))
+	require.NoError(t, d.SetSessionDataVersion(t.Context(), s.ID, previous))
+	for _, agent := range []string{"claude", "hermes", "traex"} {
+		insertSession(t, d, agent, "project", func(s *Session) { s.Agent = agent })
+		require.NoError(t, d.SetSessionDataVersion(t.Context(), agent, previous))
+	}
+	require.NoError(t, d.Update(t.Context(), func(tx *sql.Tx) error {
+		return writeUserVersion(t.Context(), tx, previous)
+	}))
+	path := d.Path()
+	require.NoError(t, d.Close())
+	upgraded, err := OpenIsolated(t.Context(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, upgraded.Close()) })
+	assert.False(t, upgraded.NeedsResync(), "repair must not rebuild the archive")
+	for _, id := range []string{s.ID, "claude"} {
+		assert.Equal(t, previous, upgraded.GetSessionDataVersion(t.Context(), id))
+	}
+	for _, id := range []string{"hermes", "traex"} {
+		assert.Equal(t, CurrentDataVersion(), upgraded.GetSessionDataVersion(t.Context(), id))
+	}
+	assert.Equal(t, messageID, timingMsgID(t, upgraded, s.ID, 0))
+	after, err := upgraded.GetSessionTiming(t.Context(), s.ID)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "missing source logs must retain archived timing")
 }
 
 func TestAdvanceScopedDataVersion(t *testing.T) {
